@@ -1,0 +1,16 @@
+fastapi
+uvicorn[standard]
+pydantic-settings
+aiosqlite
+sqlalchemy[asyncio]
+alembic
+python-multipart
+httpx
+aiosmtplib
+passlib[bcrypt]
+python-jose[cryptography]
+PyMuPDF
+python-docx
+beautifulsoup4
+lxml
+slowapi

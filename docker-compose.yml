@@ -1,0 +1,11 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/data
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:////data/slopstudy.db
+      - SECRET_KEY=changeme
+      - CORS_ORIGINS=*
