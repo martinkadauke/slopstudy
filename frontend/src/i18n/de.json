@@ -1,1 +1,165 @@
-{}
+{
+  "auth": {
+    "login": {
+      "title": "Willkommen zurück",
+      "subtitle": "Melde dich in deinem Konto an",
+      "email": "E-Mail",
+      "password": "Passwort",
+      "submit": "Anmelden",
+      "noAccount": "Noch kein Konto?",
+      "register": "Registrieren"
+    },
+    "register": {
+      "title": "Konto erstellen",
+      "subtitle": "Starte deine Lernreise",
+      "email": "E-Mail",
+      "username": "Benutzername",
+      "password": "Passwort",
+      "confirmPassword": "Passwort bestätigen",
+      "submit": "Konto erstellen",
+      "hasAccount": "Bereits ein Konto?",
+      "login": "Anmelden",
+      "passwordMismatch": "Passwörter stimmen nicht überein"
+    }
+  },
+  "nav": {
+    "topics": "Themen",
+    "stats": "Statistiken",
+    "profile": "Profil",
+    "settings": "Einstellungen",
+    "logout": "Abmelden"
+  },
+  "topics": {
+    "title": "Themen",
+    "newTopic": "Neues Thema",
+    "empty": "Noch keine Themen. Erstelle eines, um zu beginnen!",
+    "card": {
+      "cards": "{{count}} Karten",
+      "status": {
+        "draft": "Entwurf",
+        "generating": "Wird generiert",
+        "ready": "Bereit",
+        "failed": "Fehlgeschlagen"
+      }
+    },
+    "create": {
+      "title": "Neues Thema erstellen",
+      "titleLabel": "Titel",
+      "titlePlaceholder": "z.B. Machine-Learning-Grundlagen",
+      "description": "Beschreibung",
+      "descriptionPlaceholder": "Was möchtest du lernen?",
+      "submit": "Erstellen",
+      "cancel": "Abbrechen"
+    }
+  },
+  "topicDetail": {
+    "sources": "Quellen",
+    "noSources": "Noch keine Quellen hinzugefügt",
+    "uploadFile": "Datei hochladen",
+    "addUrl": "URL hinzufügen",
+    "addText": "Text hinzufügen",
+    "generatePlan": "Lernplan generieren",
+    "noSourcesHint": "Füge mindestens eine Quelle hinzu, um einen Lernplan zu erstellen",
+    "startStudying": "Lernen starten",
+    "cardCount": "{{count}} Karten bereit",
+    "error": "Generierung fehlgeschlagen. Bitte erneut versuchen.",
+    "delete": "Löschen",
+    "sourceTypes": {
+      "file": "Datei",
+      "url": "URL",
+      "text": "Text"
+    },
+    "addUrlDialog": {
+      "title": "URL hinzufügen",
+      "label": "URL",
+      "placeholder": "https://...",
+      "submit": "Hinzufügen",
+      "cancel": "Abbrechen"
+    },
+    "addTextDialog": {
+      "title": "Text hinzufügen",
+      "label": "Inhalt",
+      "placeholder": "Füge deinen Text hier ein...",
+      "submit": "Hinzufügen",
+      "cancel": "Abbrechen"
+    },
+    "status": {
+      "draft": "Entwurf",
+      "generating": "Wird generiert...",
+      "ready": "Bereit",
+      "failed": "Fehlgeschlagen"
+    }
+  },
+  "profile": {
+    "title": "Profil",
+    "username": "Benutzername",
+    "email": "E-Mail",
+    "currentPassword": "Aktuelles Passwort",
+    "newPassword": "Neues Passwort",
+    "confirmPassword": "Neues Passwort bestätigen",
+    "save": "Änderungen speichern",
+    "language": "Sprache",
+    "darkMode": "Dunkelmodus",
+    "stats": {
+      "title": "Statistiken",
+      "points": "Punkte",
+      "streak": "Tages-Streak",
+      "sessions": "Sitzungen",
+      "accuracy": "Genauigkeit"
+    },
+    "badges": {
+      "title": "Abzeichen",
+      "unearned": "Noch nicht verdient"
+    }
+  },
+  "settings": {
+    "title": "Einstellungen",
+    "ollama": {
+      "title": "Ollama",
+      "url": "Ollama URL",
+      "urlPlaceholder": "http://localhost:11434",
+      "model": "Modell",
+      "modelPlaceholder": "llama3.2",
+      "loadModels": "Modelle laden",
+      "testConnection": "Verbindung testen",
+      "connectionSuccess": "Verbindung erfolgreich",
+      "connectionFailed": "Verbindung fehlgeschlagen"
+    },
+    "smtp": {
+      "title": "SMTP",
+      "host": "Host",
+      "port": "Port",
+      "user": "Benutzername",
+      "password": "Passwort",
+      "from": "Absenderadresse",
+      "tls": "TLS verwenden",
+      "sendTest": "Test-E-Mail senden",
+      "testSuccess": "Test-E-Mail erfolgreich gesendet",
+      "testFailed": "Test-E-Mail konnte nicht gesendet werden"
+    },
+    "save": "Speichern",
+    "saved": "Einstellungen gespeichert"
+  },
+  "stats": {
+    "title": "Statistiken",
+    "points": "Gesamtpunkte",
+    "streak": "Aktueller Streak",
+    "sessions": "Gesamtsitzungen",
+    "accuracy": "Durchschnittliche Genauigkeit"
+  },
+  "common": {
+    "loading": "Laden...",
+    "error": "Ein Fehler ist aufgetreten",
+    "save": "Speichern",
+    "cancel": "Abbrechen",
+    "delete": "Löschen",
+    "add": "Hinzufügen",
+    "confirm": "Bestätigen",
+    "days": "Tage",
+    "percent": "%"
+  },
+  "language": {
+    "en": "EN",
+    "de": "DE"
+  }
+}

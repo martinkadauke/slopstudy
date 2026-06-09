@@ -1,11 +1,25 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import './i18n/setup'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { Toaster } from 'sonner'
 import App from './App'
+import './i18n'
 import './index.css'
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: 1,
+      staleTime: 30_000,
+    },
+  },
+})
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <App />
-  </React.StrictMode>,
+    <QueryClientProvider client={queryClient}>
+      <App />
+      <Toaster richColors position="top-right" />
+    </QueryClientProvider>
+  </React.StrictMode>
 )
