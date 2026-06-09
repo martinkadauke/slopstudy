@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+.pytest_cache/
+
+# Alembic
+*.db
+
+# Node
+node_modules/
+frontend/dist/
+
+# Env
+.env
+
+# Data
+data/
+
+# OS
+.DS_Store
