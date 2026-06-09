@@ -21,5 +21,5 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       <App />
       <Toaster richColors position="top-right" />
     </QueryClientProvider>
-  </React.StrictMode>
+  </React.StrictMode>,
 )

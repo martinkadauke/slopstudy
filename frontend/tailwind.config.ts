@@ -1,12 +1,11 @@
 import type { Config } from 'tailwindcss'
+import forms from '@tailwindcss/forms'
 
-const config: Config = {
+export default {
   darkMode: 'class',
-  content: ['./index.html', './src/**/*.{ts,tsx}'],
-  theme: {
-    extend: {},
-  },
-  plugins: [require('@tailwindcss/forms')],
-}
-
-export default config
+  content: [
+    './index.html',
+    './src/**/*.{js,ts,jsx,tsx}',
+  ],
+  plugins: [forms],
+} satisfies Config

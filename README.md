@@ -5,6 +5,7 @@ A noob vibecoded studying flashcard app that lets you study any topic. Self-host
 ## Quick start
 
 ```bash
+cp .env.example .env
 docker compose up --build
 ```
 

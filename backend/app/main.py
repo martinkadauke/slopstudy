@@ -1,5 +1,7 @@
-from contextlib import asynccontextmanager
+from __future__ import annotations
+
 import subprocess
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -15,12 +17,11 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="slopstudy", version=settings.version, lifespan=lifespan)
+app = FastAPI(title="slopstudy", version=settings.VERSION, lifespan=lifespan)
 
-origins = [o.strip() for o in settings.cors_origins.split(",")]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -29,9 +30,9 @@ app.add_middleware(
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "version": settings.version}
+    return {"status": "ok", "version": settings.VERSION}
 
 
-static_dir = Path(__file__).parent / "static"
-if static_dir.exists():
-    app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
+_static = Path(__file__).parent / "static"
+if _static.exists():
+    app.mount("/", StaticFiles(directory=str(_static), html=True), name="static")
