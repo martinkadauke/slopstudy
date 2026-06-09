@@ -1,1 +1,165 @@
-{}
+{
+  "auth": {
+    "login": {
+      "title": "Welcome back",
+      "subtitle": "Sign in to your account",
+      "email": "Email",
+      "password": "Password",
+      "submit": "Sign in",
+      "noAccount": "Don't have an account?",
+      "register": "Register"
+    },
+    "register": {
+      "title": "Create an account",
+      "subtitle": "Start your learning journey",
+      "email": "Email",
+      "username": "Username",
+      "password": "Password",
+      "confirmPassword": "Confirm password",
+      "submit": "Create account",
+      "hasAccount": "Already have an account?",
+      "login": "Sign in",
+      "passwordMismatch": "Passwords do not match"
+    }
+  },
+  "nav": {
+    "topics": "Topics",
+    "stats": "Stats",
+    "profile": "Profile",
+    "settings": "Settings",
+    "logout": "Sign out"
+  },
+  "topics": {
+    "title": "Topics",
+    "newTopic": "New Topic",
+    "empty": "No topics yet. Create one to get started!",
+    "card": {
+      "cards": "{{count}} cards",
+      "status": {
+        "draft": "Draft",
+        "generating": "Generating",
+        "ready": "Ready",
+        "failed": "Failed"
+      }
+    },
+    "create": {
+      "title": "Create New Topic",
+      "titleLabel": "Title",
+      "titlePlaceholder": "e.g. Machine Learning Basics",
+      "description": "Description",
+      "descriptionPlaceholder": "What do you want to learn?",
+      "submit": "Create",
+      "cancel": "Cancel"
+    }
+  },
+  "topicDetail": {
+    "sources": "Sources",
+    "noSources": "No sources added yet",
+    "uploadFile": "Upload File",
+    "addUrl": "Add URL",
+    "addText": "Add Text",
+    "generatePlan": "Generate Study Plan",
+    "noSourcesHint": "Add at least one source to generate a study plan",
+    "startStudying": "Start Studying",
+    "cardCount": "{{count}} cards ready",
+    "error": "Generation failed. Please try again.",
+    "delete": "Delete",
+    "sourceTypes": {
+      "file": "File",
+      "url": "URL",
+      "text": "Text"
+    },
+    "addUrlDialog": {
+      "title": "Add URL",
+      "label": "URL",
+      "placeholder": "https://...",
+      "submit": "Add",
+      "cancel": "Cancel"
+    },
+    "addTextDialog": {
+      "title": "Add Text",
+      "label": "Content",
+      "placeholder": "Paste or type your text here...",
+      "submit": "Add",
+      "cancel": "Cancel"
+    },
+    "status": {
+      "draft": "Draft",
+      "generating": "Generating...",
+      "ready": "Ready",
+      "failed": "Failed"
+    }
+  },
+  "profile": {
+    "title": "Profile",
+    "username": "Username",
+    "email": "Email",
+    "currentPassword": "Current password",
+    "newPassword": "New password",
+    "confirmPassword": "Confirm new password",
+    "save": "Save changes",
+    "language": "Language",
+    "darkMode": "Dark mode",
+    "stats": {
+      "title": "Statistics",
+      "points": "Points",
+      "streak": "Day Streak",
+      "sessions": "Sessions",
+      "accuracy": "Accuracy"
+    },
+    "badges": {
+      "title": "Badges",
+      "unearned": "Not yet earned"
+    }
+  },
+  "settings": {
+    "title": "Settings",
+    "ollama": {
+      "title": "Ollama",
+      "url": "Ollama URL",
+      "urlPlaceholder": "http://localhost:11434",
+      "model": "Model",
+      "modelPlaceholder": "llama3.2",
+      "loadModels": "Load Models",
+      "testConnection": "Test Connection",
+      "connectionSuccess": "Connection successful",
+      "connectionFailed": "Connection failed"
+    },
+    "smtp": {
+      "title": "SMTP",
+      "host": "Host",
+      "port": "Port",
+      "user": "Username",
+      "password": "Password",
+      "from": "From address",
+      "tls": "Use TLS",
+      "sendTest": "Send Test Email",
+      "testSuccess": "Test email sent successfully",
+      "testFailed": "Failed to send test email"
+    },
+    "save": "Save",
+    "saved": "Settings saved"
+  },
+  "stats": {
+    "title": "Statistics",
+    "points": "Total Points",
+    "streak": "Current Streak",
+    "sessions": "Total Sessions",
+    "accuracy": "Average Accuracy"
+  },
+  "common": {
+    "loading": "Loading...",
+    "error": "An error occurred",
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "add": "Add",
+    "confirm": "Confirm",
+    "days": "days",
+    "percent": "%"
+  },
+  "language": {
+    "en": "EN",
+    "de": "DE"
+  }
+}
