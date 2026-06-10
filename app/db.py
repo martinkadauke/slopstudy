@@ -1,0 +1,161 @@
+"""SQLite persistence layer. One connection per call, WAL mode for concurrency."""
+import os
+import sqlite3
+import time
+from contextlib import contextmanager
+
+DATA_DIR = os.environ.get("DATA_DIR", "/data")
+DB_PATH = os.path.join(DATA_DIR, "flashdeck.db")
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    name TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    language TEXT NOT NULL DEFAULT 'en',
+    theme TEXT NOT NULL DEFAULT 'dark',
+    ollama_url TEXT NOT NULL DEFAULT 'http://host.docker.internal:11434',
+    ollama_model TEXT NOT NULL DEFAULT 'llama3.1',
+    ollama_api_key TEXT NOT NULL DEFAULT '',
+    points INTEGER NOT NULL DEFAULT 0,
+    lifetime_points INTEGER NOT NULL DEFAULT 0,
+    email_notifications INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auth_tokens (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS topics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    title TEXT NOT NULL DEFAULT '',
+    prompt TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'multiple_choice',
+    card_count INTEGER NOT NULL DEFAULT 40,
+    language TEXT NOT NULL DEFAULT 'en',
+    status TEXT NOT NULL DEFAULT 'queued',
+    progress_msg TEXT NOT NULL DEFAULT '',
+    progress_pct INTEGER NOT NULL DEFAULT 0,
+    plan_json TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    ready_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,              -- 'file' | 'url'
+    name TEXT NOT NULL,              -- filename or url
+    file_path TEXT NOT NULL DEFAULT '',
+    content_text TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS cards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    unit_index INTEGER NOT NULL DEFAULT 0,
+    type TEXT NOT NULL,              -- 'multiple_choice' | 'exact' | 'yes_no' | 'open'
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    choices_json TEXT NOT NULL DEFAULT '',
+    explanation TEXT NOT NULL DEFAULT '',
+    difficulty INTEGER NOT NULL DEFAULT 2,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS card_progress (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+    streak INTEGER NOT NULL DEFAULT 0,
+    seen INTEGER NOT NULL DEFAULT 0,
+    due_at INTEGER NOT NULL DEFAULT 0,
+    last_result TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (user_id, card_id)
+);
+
+CREATE TABLE IF NOT EXISTS study_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    card_ids_json TEXT NOT NULL DEFAULT '[]',
+    answered_json TEXT NOT NULL DEFAULT '{}',  -- card_id -> 'correct'|'wrong'|'skipped'
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER,
+    points_earned INTEGER NOT NULL DEFAULT 0,
+    bonus_awarded INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS answer_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+    session_id INTEGER NOT NULL,
+    result TEXT NOT NULL,            -- 'correct' | 'wrong' | 'skipped'
+    answered_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_topics_user ON topics(user_id);
+CREATE INDEX IF NOT EXISTS idx_cards_topic ON cards(topic_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON study_sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_answer_log_user ON answer_log(user_id, answered_at);
+"""
+
+# Columns added after the 1.0 schema; applied idempotently so existing
+# deployments upgrade in place on container start.
+MIGRATIONS = [
+    ("cards", "long_explanation", "TEXT NOT NULL DEFAULT ''"),
+    ("cards", "sources_json", "TEXT NOT NULL DEFAULT ''"),
+    ("topics", "material_json", "TEXT NOT NULL DEFAULT ''"),
+    ("topics", "nightly_refresh", "INTEGER NOT NULL DEFAULT 0"),
+    ("topics", "last_refresh_at", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "last_report_at", "INTEGER NOT NULL DEFAULT 0"),
+    ("study_sessions", "jokers_json", "TEXT NOT NULL DEFAULT '{}'"),
+]
+
+
+def init():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    with connect() as con:
+        con.executescript(SCHEMA)
+        for table, col, decl in MIGRATIONS:
+            existing = [r[1] for r in con.execute(f"PRAGMA table_info({table})")]
+            if col not in existing:
+                con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
+
+@contextmanager
+def connect():
+    con = sqlite3.connect(DB_PATH, timeout=30)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA foreign_keys=ON")
+    try:
+        yield con
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
+def now() -> int:
+    return int(time.time())
+
+
+def one(con, sql, params=()):
+    row = con.execute(sql, params).fetchone()
+    return dict(row) if row else None
+
+
+def all_rows(con, sql, params=()):
+    return [dict(r) for r in con.execute(sql, params).fetchall()]

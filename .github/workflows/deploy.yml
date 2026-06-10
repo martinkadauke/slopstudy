@@ -1,0 +1,50 @@
+name: CI & Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Byte-compile and import the app
+        run: |
+          python -m compileall -q app
+          python -c "from app import main, worker, llm, websearch, gamification, emailer, extract, auth, db"
+      - name: Frontend syntax check
+        run: node --check static/app.js && node --check static/i18n.js
+
+  deploy:
+    # Runs on the self-hosted runner container on the Unraid box, which builds
+    # the image locally and swaps the container — no registry needed.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: check
+    runs-on: self-hosted
+    concurrency: deploy-flashdeck
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t flashdeck:${{ github.sha }} -t flashdeck:latest .
+      - name: Swap container
+        run: |
+          docker rm -f flashdeck 2>/dev/null || true
+          docker run -d --name flashdeck --restart unless-stopped \
+            -p 8090:8000 \
+            -v /mnt/user/appdata/flashdeck/data:/data \
+            --env-file /mnt/user/appdata/flashdeck/.env \
+            flashdeck:latest
+      - name: Health check
+        run: |
+          sleep 8
+          docker exec flashdeck python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"
+          echo "Deployed $(docker ps --filter name=flashdeck --format '{{.Status}}')"
+      - name: Prune old images
+        run: docker image prune -f

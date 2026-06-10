@@ -1,0 +1,915 @@
+/* FlashDeck SPA — no build step, hash routing. */
+"use strict";
+
+const state = {
+  user: null,
+  topics: [],
+  topic: null,
+  stats: null,
+  leaderboard: [],
+  study: null, // {sessionId, topicTitle, cards, idx, feedback, summary, results}
+  newFiles: [],
+  authMode: "login",
+  pollTimer: null,
+};
+
+/* ---------------- utils ---------------- */
+
+const $ = (sel) => document.querySelector(sel);
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function lang() {
+  return state.user?.language || localStorage.getItem("fd_lang") ||
+    (navigator.language || "en").slice(0, 2);
+}
+
+function t(key, a, b) {
+  const dict = I18N[lang()] || I18N.en;
+  let s = dict[key] ?? I18N.en[key] ?? key;
+  if (a !== undefined) s = s.replace("{a}", a);
+  if (b !== undefined) s = s.replace("{b}", b);
+  return s;
+}
+
+function applyTheme() {
+  const theme = state.user?.theme || localStorage.getItem("fd_theme") || "dark";
+  document.documentElement.dataset.theme = theme;
+}
+
+function toast(msg, kind = "") {
+  const el = document.createElement("div");
+  el.className = "toast " + kind;
+  el.textContent = msg;
+  $("#toast-root").appendChild(el);
+  setTimeout(() => el.remove(), 3500);
+}
+
+function apiError(e) {
+  const code = e?.detail || e?.message || String(e);
+  const known = { invalid_credentials: 1, email_taken: 1, wrong_password: 1,
+    not_enough_points: 1, topic_not_ready: 1, joker_used: 1 };
+  toast(known[code] ? t("err_" + code) : t("err_generic", code), "error");
+}
+
+async function api(path, opts = {}) {
+  if (opts.json !== undefined) {
+    opts.body = JSON.stringify(opts.json);
+    opts.headers = { "Content-Type": "application/json" };
+    opts.method = opts.method || "POST";
+  }
+  const resp = await fetch("/api" + path, { credentials: "same-origin", ...opts });
+  if (resp.status === 401) {
+    state.user = null;
+    go("auth");
+    throw { detail: "not_authenticated" };
+  }
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw typeof data.detail === "string" ? data : { detail: resp.status };
+  return data;
+}
+
+function go(route) { location.hash = "#/" + route; }
+
+function fmtDate(ts) {
+  return new Date(ts * 1000).toLocaleDateString(lang() === "de" ? "de-DE" : "en-US",
+    { day: "numeric", month: "short" });
+}
+
+/* ---------------- shell ---------------- */
+
+function navLink(route, key, ico) {
+  const current = (location.hash.slice(2) || "dashboard").split("/")[0];
+  const active = current === route ? "active" : "";
+  return `<a class="${active}" href="#/${route}"><span class="ico">${ico}</span> ${t(key)}</a>`;
+}
+
+function shell(content) {
+  const u = state.user;
+  return `
+  <div class="shell">
+    <header class="topbar">
+      <div class="logo" onclick="location.hash='#/dashboard'">🎴 FlashDeck</div>
+      <nav>
+        ${navLink("dashboard", "nav_dashboard", "🏠")}
+        ${navLink("new", "nav_new", "✨")}
+        ${navLink("leaderboard", "nav_leaderboard", "🏆")}
+        ${navLink("settings", "nav_settings", "⚙️")}
+      </nav>
+      <div class="statpills">
+        <span class="pill" title="${t("points")}"><span class="ico">💎</span> <span id="points-pill">${u.points}</span></span>
+        <span class="pill" title="${t("level")}"><span class="ico">⭐</span> ${t("level")} ${u.level.level}</span>
+        ${u.streak ? `<span class="pill" title="${t("streak_days")}"><span class="ico">🔥</span> ${u.streak}</span>` : ""}
+      </div>
+    </header>
+    <main>${content}</main>
+    <nav class="bottomnav">
+      ${navLink("dashboard", "nav_dashboard", "🏠")}
+      ${navLink("new", "nav_new", "✨")}
+      ${navLink("leaderboard", "nav_leaderboard", "🏆")}
+      ${navLink("settings", "nav_settings", "⚙️")}
+    </nav>
+  </div>`;
+}
+
+function setPointsPill(points) {
+  state.user.points = points;
+  const el = $("#points-pill");
+  if (el) el.textContent = points;
+}
+
+/* ---------------- auth view ---------------- */
+
+function renderAuth() {
+  const isLogin = state.authMode === "login";
+  $("#app").innerHTML = `
+  <div class="auth-wrap">
+    <div class="auth-hero">
+      <div class="logo">🎴 FlashDeck</div>
+      <p class="dim">${t("tagline")}</p>
+    </div>
+    <div class="card">
+      <h2>${isLogin ? t("login") : t("register")}</h2>
+      <form id="auth-form">
+        ${isLogin ? "" : `
+        <label class="field"><span>${t("name")}</span>
+          <input type="text" name="name" required maxlength="80"></label>
+        <label class="field"><span>${t("language")}</span>
+          <select name="language">
+            <option value="en" ${lang() === "en" ? "selected" : ""}>English</option>
+            <option value="de" ${lang() === "de" ? "selected" : ""}>Deutsch</option>
+          </select></label>`}
+        <label class="field"><span>${t("email")}</span>
+          <input type="email" name="email" required autocomplete="email"></label>
+        <label class="field"><span>${t("password")}</span>
+          <input type="password" name="password" required minlength="8"
+            autocomplete="${isLogin ? "current-password" : "new-password"}">
+          ${isLogin ? "" : `<small class="dim">${t("password_hint")}</small>`}</label>
+        <button class="btn primary block" type="submit">${isLogin ? t("login") : t("register")}</button>
+      </form>
+      <p style="text-align:center;margin-bottom:0">
+        <a href="#" id="auth-toggle">${isLogin ? t("no_account") : t("have_account")}</a>
+      </p>
+    </div>
+  </div>`;
+
+  $("#auth-toggle").onclick = (e) => {
+    e.preventDefault();
+    state.authMode = isLogin ? "register" : "login";
+    renderAuth();
+  };
+  $("#auth-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const body = Object.fromEntries(fd.entries());
+    try {
+      await api(isLogin ? "/login" : "/register", { json: body });
+      if (body.language) localStorage.setItem("fd_lang", body.language);
+      await loadUser();
+      go("dashboard");
+    } catch (err) { apiError(err); }
+  };
+}
+
+/* ---------------- dashboard ---------------- */
+
+function progressLabel(topic) {
+  const msg = topic.progress_msg || "";
+  if (msg.startsWith("generating_unit:")) {
+    const [a, b] = msg.split(":")[1].split("/");
+    return t("prog_generating_unit", a, b);
+  }
+  if (msg === "planning") return t("prog_planning");
+  if (msg === "extracting_sources") return t("prog_extracting_sources");
+  return t("status_processing");
+}
+
+function topicCardHtml(topic) {
+  const badge = `<span class="badge ${topic.status}">${t("status_" + topic.status)}</span>`;
+  const mode = `<span class="badge mode">${t("mode_" + topic.mode)}</span>`;
+  let body = "";
+  if (topic.status === "processing" || topic.status === "queued") {
+    body = `
+      <div class="progressbar"><div style="width:${topic.progress_pct}%"></div></div>
+      <div class="small dim">${topic.status === "queued" ? t("status_queued") : progressLabel(topic)}
+        · ${state.user.smtp_enabled && state.user.email_notifications ? t("email_notice") : t("email_notice_off")}</div>`;
+  } else if (topic.status === "failed") {
+    body = `<div class="small" style="color:var(--bad)">${esc(topic.error)}</div>
+      <div class="row">
+        <button class="btn sm" onclick="FD.retryTopic(${topic.id})">${t("retry")}</button>
+        <button class="btn sm danger" onclick="FD.deleteTopic(${topic.id})">${t("delete")}</button>
+      </div>`;
+  } else {
+    body = `
+      <div class="small dim">${topic.card_count} ${t("cards")} · ${topic.units} ${t("units")}
+        ${topic.due_cards ? ` · <b style="color:var(--accent)">${topic.due_cards} ${t("due_now")}</b>` : ""}</div>
+      <div class="row">
+        <button class="btn sm primary" onclick="FD.quickStart(${topic.id})">▶ ${t("study_now")}</button>
+        <a class="btn sm ghost" href="#/topic/${topic.id}">${t("view_topic")}</a>
+      </div>`;
+  }
+  return `
+  <div class="card topic-card">
+    <div class="row spread">${mode}${badge}</div>
+    <h3><a href="#/topic/${topic.id}" style="color:inherit">${esc(topic.title)}</a></h3>
+    ${body}
+  </div>`;
+}
+
+function statsCardHtml() {
+  const s = state.stats;
+  if (!s || !s.totals.sessions) return "";
+  const accuracy = s.answers.seen ? Math.round(100 * s.answers.correct / s.answers.seen) : 0;
+  const max = Math.max(1, ...s.week.map((d) => d.points));
+  const days = s.week.map((d) =>
+    `<div class="bar" style="height:${Math.max(4, Math.round(86 * d.points / max))}px" title="${d.points} ${t("points")}">
+       <span>${esc(d.day.slice(5))}</span></div>`).join("");
+  return `
+  <div class="card">
+    <div class="row spread">
+      <h2 style="margin:0">${t("week_activity")}</h2>
+      <div class="row">
+        <span class="pill">📚 ${s.totals.sessions} ${t("total_sessions")}</span>
+        <span class="pill">🎯 ${accuracy}% ${t("accuracy")}</span>
+        ${s.streak ? `<span class="pill">🔥 ${s.streak} ${t("streak_days")}</span>` : ""}
+      </div>
+    </div>
+    <div class="bars" style="margin-bottom:22px">${days || ""}</div>
+  </div>`;
+}
+
+async function renderDashboard() {
+  [state.topics, state.stats] = await Promise.all([api("/topics"), api("/stats")]);
+  const topics = state.topics;
+  let content;
+  if (!topics.length) {
+    content = `<div class="card empty">
+      <div class="big">🎴</div>
+      <p>${t("no_topics")}</p>
+      <a class="btn primary" href="#/new">✨ ${t("create_first")}</a>
+    </div>`;
+  } else {
+    content = statsCardHtml() +
+      `<h1>${t("your_topics")}</h1><div class="grid">${topics.map(topicCardHtml).join("")}</div>`;
+  }
+  $("#app").innerHTML = shell(content);
+  schedulePoll();
+}
+
+function schedulePoll() {
+  clearTimeout(state.pollTimer);
+  const busy = state.topics.some((t2) => t2.status === "queued" || t2.status === "processing");
+  const route = location.hash.slice(2).split("/")[0] || "dashboard";
+  if (busy && route === "dashboard") {
+    state.pollTimer = setTimeout(() => renderDashboard().catch(() => {}), 4000);
+  }
+}
+
+/* ---------------- new topic ---------------- */
+
+const MODES = ["multiple_choice", "exact", "yes_no", "exam"];
+
+function renderNew() {
+  state.newFiles = [];
+  const modeOpts = MODES.map((m, i) => `
+    <div class="opt ${i === 0 ? "active" : ""}" data-mode="${m}" onclick="FD.pickMode(this)">
+      <b>${t("mode_" + m)}</b><small>${t("mode_" + m + "_desc")}</small>
+    </div>`).join("");
+  $("#app").innerHTML = shell(`
+  <h1>✨ ${t("new_topic")}</h1>
+  <form id="new-form" class="card">
+    <label class="field"><span>${t("topic_prompt_label")}</span>
+      <textarea name="prompt" required minlength="3" maxlength="4000"
+        placeholder="${esc(t("topic_prompt_ph"))}"></textarea></label>
+
+    <label class="field"><span>${t("mode_label")}</span></label>
+    <div class="seg" id="mode-seg">${modeOpts}</div>
+
+    <div class="row" style="margin-top:14px">
+      <label class="field" style="flex:1;min-width:140px"><span>${t("card_count_label")}</span>
+        <select name="card_count">
+          <option>20</option><option selected>40</option><option>60</option><option>80</option><option>100</option>
+        </select></label>
+      <label class="field" style="flex:1;min-width:140px"><span>${t("card_lang_label")}</span>
+        <select name="language">
+          <option value="en" ${lang() === "en" ? "selected" : ""}>English</option>
+          <option value="de" ${lang() === "de" ? "selected" : ""}>Deutsch</option>
+        </select></label>
+    </div>
+
+    <label class="field"><span>${t("sources_label")}</span></label>
+    <div class="dropzone" id="dropzone">📄 ${t("upload_hint")}</div>
+    <input type="file" id="file-input" multiple hidden accept=".pdf,.docx,.txt,.md,.csv">
+    <div id="file-chips"></div>
+    <label class="field" style="margin-top:14px"><span>${t("urls_label")}</span>
+      <textarea name="urls" rows="2" placeholder="https://…"></textarea></label>
+
+    <button class="btn primary block" type="submit" id="create-btn">🚀 ${t("create_topic")}</button>
+    <p class="small dim" style="text-align:center;margin-bottom:0">
+      ${state.user.smtp_enabled && state.user.email_notifications ? t("email_notice") : t("email_notice_off")}</p>
+  </form>`);
+
+  const dz = $("#dropzone"), fi = $("#file-input");
+  dz.onclick = () => fi.click();
+  dz.ondragover = (e) => { e.preventDefault(); dz.classList.add("drag"); };
+  dz.ondragleave = () => dz.classList.remove("drag");
+  dz.ondrop = (e) => {
+    e.preventDefault(); dz.classList.remove("drag");
+    addFiles(e.dataTransfer.files);
+  };
+  fi.onchange = () => { addFiles(fi.files); fi.value = ""; };
+
+  $("#new-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = $("#create-btn");
+    btn.disabled = true;
+    btn.textContent = t("creating");
+    const fd = new FormData(e.target);
+    fd.set("mode", $("#mode-seg .opt.active").dataset.mode);
+    for (const f of state.newFiles) fd.append("files", f);
+    try {
+      await api("/topics", { method: "POST", body: fd });
+      toast("✨ " + t("status_queued"), "success");
+      go("dashboard");
+    } catch (err) {
+      apiError(err);
+      btn.disabled = false;
+      btn.textContent = "🚀 " + t("create_topic");
+    }
+  };
+}
+
+function addFiles(list) {
+  for (const f of list) {
+    if (state.newFiles.length >= 10) break;
+    state.newFiles.push(f);
+  }
+  renderFileChips();
+}
+
+function renderFileChips() {
+  $("#file-chips").innerHTML = state.newFiles.map((f, i) =>
+    `<span class="filechip">📄 ${esc(f.name)}
+       <button type="button" onclick="FD.removeFile(${i})">✕</button></span>`).join("");
+}
+
+/* ---------------- topic detail ---------------- */
+
+async function renderTopic(id) {
+  const topic = await api("/topics/" + id);
+  state.topic = topic;
+  let planHtml = "";
+  if (topic.plan) {
+    const units = topic.plan.units.map((u, i) => `
+      <div class="unit">
+        <button type="button" onclick="this.parentNode.querySelector('.unit-body').hidden ^= 1">
+          <span>${i + 1}. ${esc(u.title)}</span><span>▾</span></button>
+        <div class="unit-body" hidden>
+          ${u.objectives?.length ? `<h3>${t("objectives")}</h3><ul>${u.objectives.map((o) => `<li>${esc(o)}</li>`).join("")}</ul>` : ""}
+          ${u.key_concepts?.length ? `<h3>${t("key_concepts")}</h3><ul>${u.key_concepts.map((o) => `<li>${esc(o)}</li>`).join("")}</ul>` : ""}
+          ${u.pitfalls?.length ? `<h3>${t("pitfalls")}</h3><ul>${u.pitfalls.map((o) => `<li>${esc(o)}</li>`).join("")}</ul>` : ""}
+        </div>
+      </div>`).join("");
+    planHtml = `<div class="card">
+      <h2>📋 ${t("plan")}</h2>
+      <p class="dim">${esc(topic.plan.overview || "")}</p>${units}</div>`;
+  }
+
+  let actionHtml = "";
+  if (topic.status === "ready") {
+    actionHtml = `<div class="card">
+      <div class="row spread">
+        <div>
+          <div class="small dim">${topic.card_count} ${t("cards")} · ${topic.units} ${t("units")}
+            ${topic.due_cards ? ` · <b style="color:var(--accent)">${topic.due_cards} ${t("due_now")}</b>` : ""}</div>
+          <div class="small dim">${t("topic_stats", topic.stats.sessions, topic.stats.points)}</div>
+        </div>
+        <div class="row">
+          <label class="field" style="margin:0"><span class="small">${t("session_size")}</span>
+            <select id="sess-size"><option>5</option><option selected>10</option><option>15</option><option>20</option></select>
+          </label>
+          <button class="btn primary" onclick="FD.startSession(${topic.id})">▶ ${t("start_session")}</button>
+        </div>
+      </div>
+      <label class="switch" style="margin-top:14px" title="${esc(t("nightly_refresh_hint"))}">
+        <input type="checkbox" ${topic.nightly_refresh ? "checked" : ""}
+          onchange="FD.toggleRefresh(${topic.id}, this.checked)">
+        <span class="track"></span> 🌙 ${t("nightly_refresh")}
+      </label>
+      <p class="small dim" style="margin:6px 0 0">${t("nightly_refresh_hint")}</p>
+    </div>`;
+  } else if (topic.status === "failed") {
+    actionHtml = `<div class="card">
+      <h2 style="color:var(--bad)">${t("generation_failed")}</h2>
+      <p class="small">${esc(topic.error)}</p>
+      <div class="row">
+        <button class="btn" onclick="FD.retryTopic(${topic.id})">${t("retry")}</button>
+        <button class="btn danger" onclick="FD.deleteTopic(${topic.id})">${t("delete")}</button>
+      </div></div>`;
+  } else {
+    actionHtml = `<div class="card">
+      <div class="progressbar"><div style="width:${topic.progress_pct}%"></div></div>
+      <p class="small dim" style="margin-bottom:0">${topic.status === "queued" ? t("status_queued") : progressLabel(topic)}</p>
+    </div>`;
+    setTimeout(() => {
+      if (location.hash === "#/topic/" + id) renderTopic(id).catch(() => {});
+    }, 4000);
+  }
+
+  let materialHtml = "";
+  if (topic.status === "ready") {
+    const mat = (topic.material || []).filter((m) => m.text);
+    const expected = topic.plan ? topic.plan.units.length : 0;
+    const items = mat.map((m) => `
+      <div class="unit">
+        <button type="button" onclick="this.parentNode.querySelector('.unit-body').hidden ^= 1">
+          <span>📖 ${esc(m.title)}</span><span>▾</span></button>
+        <div class="unit-body" hidden>
+          ${m.text.split(/\n\n+/).map((p) => `<p>${esc(p)}</p>`).join("")}
+          ${(m.sources || []).length ? `<p class="small srcs"><b>🔗 ${t("web_sources")}:</b> ${
+            m.sources.map((s) => `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title)}</a>`).join(" · ")
+          }</p>` : ""}
+        </div>
+      </div>`).join("");
+    materialHtml = `<div class="card">
+      <h2>📖 ${t("learning_material")}</h2>
+      <div class="hintbox">🧠 ${t("pretest_hint")}</div>
+      ${items}
+      ${mat.length < expected ? `<p class="small dim" style="margin-bottom:0">⏳ ${t("material_pending")}</p>` : ""}
+    </div>`;
+    // Refresh quietly while background enrichment is still producing material,
+    // but never once notes exist (a re-render would collapse what you're reading).
+    if (!mat.length && expected) {
+      setTimeout(() => {
+        if (location.hash === "#/topic/" + topic.id) renderTopic(topic.id).catch(() => {});
+      }, 8000);
+    }
+  }
+
+  const enriching = topic.status === "ready" && (topic.progress_msg || "").startsWith("enriching")
+    ? `<p class="small dim">🔎 ${t("enriching_note")}</p>` : "";
+
+  const sources = topic.sources.length
+    ? `<div class="card"><h2>🔗 ${t("sources")}</h2>
+        ${topic.sources.map((s) => `<span class="filechip">${s.kind === "url" ? "🌐" : "📄"} ${esc(s.name)}</span>`).join("")}</div>`
+    : "";
+
+  $("#app").innerHTML = shell(`
+    <div class="row spread">
+      <h1>${esc(topic.title)} <span class="badge mode">${t("mode_" + topic.mode)}</span></h1>
+      ${topic.status === "ready" ? `<button class="btn sm danger right" onclick="FD.deleteTopic(${topic.id})">${t("delete")}</button>` : ""}
+    </div>
+    ${enriching}${actionHtml}${materialHtml}${planHtml}${sources}`);
+}
+
+/* ---------------- study session ---------------- */
+
+async function startSessionFor(topicId, size) {
+  try {
+    const data = await api("/sessions/start", { json: { topic_id: topicId, size } });
+    state.study = {
+      sessionId: data.session_id, topicTitle: data.topic_title,
+      cards: data.cards, idx: 0, feedback: null, summary: null,
+      fifty: {}, optionsShown: false,
+    };
+    setPointsPill(data.points);
+    go("study");
+  } catch (err) { apiError(err); }
+}
+
+function diffDots(d) {
+  return `<span class="diffdots" title="${t("difficulty")} ${d}/5">` +
+    [1, 2, 3, 4, 5].map((i) => `<i class="${i <= d ? "on" : ""}"></i>`).join("") + "</span>";
+}
+
+function renderStudy() {
+  const st = state.study;
+  if (!st) { go("dashboard"); return; }
+  if (st.summary) { renderSummary(); return; }
+  const card = st.cards[st.idx];
+  const fb = st.feedback;
+  const canSkip = state.user.points >= card.skip_cost;
+
+  let answerArea = "";
+  if (!fb) {
+    if (card.type === "multiple_choice") {
+      if (!st.optionsShown) {
+        // Active recall: force a retrieval attempt before recognition kicks in.
+        answerArea = `
+          <p class="dim small" style="margin:14px 0 10px">🧠 ${t("recall_first")}</p>
+          <button class="btn primary" onclick="FD.showOptions()">${t("show_options")}</button>`;
+      } else {
+        const removed = (st.fifty && st.fifty[card.id]) || [];
+        answerArea = `<div class="choice-grid">` + card.choices.map((c) => {
+          if (removed.includes(c)) {
+            return `<button class="choice removed" disabled>${esc(c)}</button>`;
+          }
+          return `<button class="choice" onclick="FD.answer(this.dataset.v)" data-v="${esc(c)}">${esc(c)}</button>`;
+        }).join("") + `</div>`;
+      }
+    } else if (card.type === "yes_no") {
+      answerArea = `<div class="choice-grid" style="grid-template-columns:1fr 1fr">
+        <button class="choice" style="text-align:center" onclick="FD.answer('yes')">👍 ${t("yes")}</button>
+        <button class="choice" style="text-align:center" onclick="FD.answer('no')">👎 ${t("no")}</button>
+      </div>`;
+    } else if (card.type === "exact") {
+      answerArea = `<form onsubmit="event.preventDefault();FD.answer(this.a.value)">
+        <div class="row" style="margin:14px 0">
+          <input type="text" name="a" autofocus autocomplete="off" placeholder="${esc(t("your_answer_ph"))}" style="flex:1">
+          <button class="btn primary" type="submit">${t("check")}</button>
+        </div></form>`;
+    } else { // open / self-graded
+      answerArea = st.revealed
+        ? `<div class="feedback" style="border:1.5px solid var(--border)">
+             <b>${t("correct_answer")}:</b> ${esc(card.answer || "")}
+             ${card.explanation ? `<div class="small dim" style="margin-top:4px">${esc(card.explanation)}</div>` : ""}
+           </div>
+           <p style="font-weight:700;margin-bottom:8px">${t("self_grade_q")}</p>
+           <div class="row">
+             <button class="btn ok" onclick="FD.selfGrade(true)">✓ ${t("i_was_right")}</button>
+             <button class="btn danger" onclick="FD.selfGrade(false)">✗ ${t("i_was_wrong")}</button>
+           </div>`
+        : `<button class="btn primary" style="margin-top:12px" onclick="FD.reveal()">${t("show_answer")}</button>`;
+    }
+  }
+
+  let feedbackArea = "";
+  if (fb) {
+    const last = st.idx === st.cards.length - 1;
+    feedbackArea = `
+      <div class="feedback ${fb.correct ? "ok" : "bad"}">
+        <div class="head">${fb.skipped ? "⏭ " + t("skipped") : fb.correct ? "🎉 " + t("correct") : "❌ " + t("wrong")}
+          <span class="pts-float ${fb.points_delta >= 0 ? "plus" : "minus"}">
+            ${fb.points_delta >= 0 ? "+" : ""}${fb.points_delta} ${t("points")}</span></div>
+        ${fb.skipped ? "" : `
+          <div style="margin-top:6px"><b>${t("correct_answer")}:</b> ${esc(fb.answer)}</div>
+          ${fb.explanation ? `<div class="small dim" style="margin-top:4px"><b>${t("explanation")}:</b> ${esc(fb.explanation)}</div>` : ""}`}
+      </div>
+      ${fb.long_explanation ? `
+        <div class="deepdive">
+          <b>📚 ${t("deep_dive")}</b>
+          <p>${esc(fb.long_explanation)}</p>
+          ${(fb.web_sources || []).length ? `<div class="small srcs"><b>🔗 ${t("web_sources")}:</b> ${
+            fb.web_sources.map((s) => `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title)}</a>`).join(" · ")
+          }</div>` : ""}
+        </div>` : ""}
+      <button class="btn primary block" style="margin-top:14px" onclick="FD.next()">
+        ${last ? "🏁 " + t("finish_session") : t("next_card") + " →"}</button>`;
+  }
+
+  $("#app").innerHTML = shell(`
+  <div class="study-wrap">
+    <div class="row spread">
+      <span class="dim small">${esc(st.topicTitle)} — ${t("card_x_of_y", st.idx + 1, st.cards.length)}</span>
+      <a href="#" class="small" onclick="event.preventDefault();FD.quit()">${t("quit_session")}</a>
+    </div>
+    <div class="progressbar" style="margin-top:8px"><div style="width:${Math.round(100 * st.idx / st.cards.length)}%"></div></div>
+    <div class="qcard">
+      <div class="row spread">
+        ${diffDots(card.difficulty)}
+        <span class="badge diff">+${card.points_correct} / ${card.points_wrong}</span>
+      </div>
+      <div class="question">${esc(card.question)}</div>
+      ${answerArea}${feedbackArea}
+      ${fb ? "" : (() => {
+        const fiftyUsed = !!(st.fifty && st.fifty[card.id]);
+        const fiftyAvailable = card.type === "multiple_choice" && card.choices.length >= 4 &&
+          st.optionsShown && !fiftyUsed;
+        const canFifty = state.user.points >= card.fifty_cost;
+        return `<div class="row" style="margin-top:18px">
+          ${fiftyUsed ? `<span class="small dim">✂️ ${t("fifty_done")}</span>` : ""}
+          ${fiftyAvailable ? `<button class="btn ghost sm" ${canFifty ? "" : "disabled"} onclick="FD.fifty()">
+            ✂️ ${canFifty ? t("fifty_for", card.fifty_cost) : t("fifty_locked", card.fifty_cost)}</button>` : ""}
+          <button class="btn ghost sm right" ${canSkip ? "" : "disabled"} onclick="FD.skip()">
+            🃏 ${canSkip ? t("skip_for", card.skip_cost) : t("skip_locked", card.skip_cost)}</button>
+        </div>`;
+      })()}
+    </div>
+  </div>`);
+  const input = $(".qcard input[type=text]");
+  if (input) input.focus();
+}
+
+function renderSummary() {
+  const s = state.study.summary;
+  $("#app").innerHTML = shell(`
+  <div class="study-wrap">
+    <div class="qcard" style="text-align:center">
+      <div style="font-size:46px">🏆</div>
+      <h1 style="margin:8px 0">${t("summary")}</h1>
+      <div class="summary-stats">
+        <div class="stat"><b style="color:var(--ok)">${s.counts.correct || 0}</b>${t("sum_correct")}</div>
+        <div class="stat"><b style="color:var(--bad)">${s.counts.wrong || 0}</b>${t("sum_wrong")}</div>
+        <div class="stat"><b>${s.counts.skipped || 0}</b>${t("sum_skipped")}</div>
+      </div>
+      ${s.bonus ? `<p>🎁 ${t("session_bonus")}: <b class="pts-float plus">+${s.bonus}</b></p>` : ""}
+      <p style="font-size:18px">${t("points_earned")}:
+        <b class="pts-float ${s.points_earned >= 0 ? "plus" : "minus"}">${s.points_earned >= 0 ? "+" : ""}${s.points_earned}</b></p>
+      <div class="levelbar" style="margin:14px 0">
+        <span class="pill">⭐ ${t("level")} ${s.level.level}</span>
+        <div class="progressbar"><div style="width:${Math.round(100 * s.level.progress)}%"></div></div>
+      </div>
+      ${s.streak ? `<p>🔥 ${s.streak} ${t("streak_days")}</p>` : ""}
+      <button class="btn primary block" onclick="FD.backToDash()">${t("back_dashboard")}</button>
+    </div>
+  </div>`);
+}
+
+async function submitAnswer(payload) {
+  const st = state.study;
+  const card = st.cards[st.idx];
+  try {
+    const res = await api(`/sessions/${st.sessionId}/answer`, {
+      json: { card_id: card.id, ...payload },
+    });
+    st.feedback = res;
+    st.revealed = false;
+    setPointsPill(res.points);
+    renderStudy();
+  } catch (err) { apiError(err); }
+}
+
+async function finishStudy() {
+  const st = state.study;
+  try {
+    const res = await api(`/sessions/${st.sessionId}/finish`, { method: "POST" });
+    st.summary = res;
+    setPointsPill(res.points);
+    state.user.streak = res.streak;
+    state.user.level = res.level;
+    renderStudy();
+  } catch (err) { apiError(err); }
+}
+
+/* ---------------- settings ---------------- */
+
+function renderSettings() {
+  const u = state.user;
+  $("#app").innerHTML = shell(`
+  <h1>⚙️ ${t("settings")}</h1>
+
+  <form class="card" id="profile-form">
+    <h2>👤 ${t("profile")}</h2>
+    <div class="row">
+      <label class="field" style="flex:1;min-width:200px"><span>${t("name")}</span>
+        <input type="text" name="name" value="${esc(u.name)}" required maxlength="80"></label>
+      <label class="field" style="flex:1;min-width:200px"><span>${t("email")}</span>
+        <input type="email" name="email" value="${esc(u.email)}" required></label>
+    </div>
+    <div class="row" style="margin-bottom:14px">
+      <label class="field" style="flex:1;min-width:160px;margin:0"><span>${t("language")}</span>
+        <select name="language">
+          <option value="en" ${u.language === "en" ? "selected" : ""}>English</option>
+          <option value="de" ${u.language === "de" ? "selected" : ""}>Deutsch</option>
+        </select></label>
+      <label class="switch" style="margin-top:20px">
+        <input type="checkbox" name="theme_dark" ${u.theme === "dark" ? "checked" : ""}>
+        <span class="track"></span> 🌙 ${t("appearance_dark")}</label>
+    </div>
+    <label class="switch" style="margin-bottom:16px">
+      <input type="checkbox" name="email_notifications" ${u.email_notifications ? "checked" : ""} ${u.smtp_enabled ? "" : "disabled"}>
+      <span class="track"></span> 📧 ${t("notifications")} ${u.smtp_enabled ? "" : `<span class="dim small">${t("smtp_disabled_hint")}</span>`}</label>
+    <button class="btn primary" type="submit">${t("save")}</button>
+  </form>
+
+  <form class="card" id="ollama-form">
+    <h2>🦙 ${t("ollama")}</h2>
+    <label class="field"><span>${t("ollama_url")}</span>
+      <input type="text" name="ollama_url" value="${esc(u.ollama_url)}" required>
+      <small class="dim">${t("ollama_url_hint")}</small></label>
+    <div class="row">
+      <label class="field" style="flex:1;min-width:180px"><span>${t("ollama_model")}</span>
+        <input type="text" name="ollama_model" value="${esc(u.ollama_model)}" required></label>
+      <label class="field" style="flex:2;min-width:220px"><span>${t("ollama_key")}</span>
+        <input type="password" name="ollama_api_key" placeholder="${u.ollama_api_key_set ? t("ollama_key_keep") : ""}"></label>
+    </div>
+    <div class="row">
+      <button class="btn primary" type="submit">${t("save")}</button>
+      <button class="btn ghost" type="button" id="test-btn">🔌 ${t("test_connection")}</button>
+    </div>
+    <p class="small" id="test-result" style="margin-bottom:0"></p>
+  </form>
+
+  <form class="card" id="pw-form">
+    <h2>🔒 ${t("change_password")}</h2>
+    <div class="row">
+      <label class="field" style="flex:1;min-width:200px"><span>${t("password_current")}</span>
+        <input type="password" name="current_password" required autocomplete="current-password"></label>
+      <label class="field" style="flex:1;min-width:200px"><span>${t("password_new")}</span>
+        <input type="password" name="new_password" required minlength="8" autocomplete="new-password"></label>
+    </div>
+    <button class="btn primary" type="submit">${t("save")}</button>
+  </form>
+
+  <div class="card">
+    <h2>💎 ${t("how_points_title")}</h2>
+    <p class="small dim" style="margin-bottom:0">${t("how_points")}</p>
+  </div>
+
+  <div class="card row spread">
+    <span class="dim small">${esc(u.email)}</span>
+    <button class="btn danger" onclick="FD.logout()">${t("nav_logout")}</button>
+  </div>`);
+
+  $("#profile-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    // Disabled checkboxes are excluded from FormData — don't interpret a
+    // disabled notifications toggle (SMTP off) as "user unchecked it".
+    const notifEl = e.target.querySelector("[name=email_notifications]");
+    try {
+      await api("/me", { method: "PUT", json: {
+        name: fd.get("name"), email: fd.get("email"), language: fd.get("language"),
+        theme: fd.get("theme_dark") ? "dark" : "light",
+        email_notifications: notifEl.disabled ? undefined : !!fd.get("email_notifications"),
+      }});
+      localStorage.setItem("fd_lang", fd.get("language"));
+      localStorage.setItem("fd_theme", fd.get("theme_dark") ? "dark" : "light");
+      await loadUser();
+      toast(t("saved"), "success");
+      renderSettings();
+    } catch (err) { apiError(err); }
+  };
+
+  $("#ollama-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try {
+      await api("/me/ollama", { method: "PUT", json: {
+        ollama_url: fd.get("ollama_url"), ollama_model: fd.get("ollama_model"),
+        ollama_api_key: fd.get("ollama_api_key") || null,
+      }});
+      await loadUser();
+      toast(t("saved"), "success");
+    } catch (err) { apiError(err); }
+  };
+
+  $("#test-btn").onclick = async () => {
+    const out = $("#test-result");
+    out.textContent = t("testing");
+    out.style.color = "";
+    try {
+      const res = await api("/ollama/test", { method: "POST" });
+      if (res.ok) {
+        out.style.color = res.model_available ? "var(--ok)" : "var(--warn)";
+        out.textContent = res.model_available
+          ? t("conn_ok", state.user.ollama_model)
+          : t("conn_ok_no_model", state.user.ollama_model, res.models.join(", ") || "—");
+      } else {
+        out.style.color = "var(--bad)";
+        out.textContent = res.error;
+      }
+    } catch (err) {
+      out.style.color = "var(--bad)";
+      out.textContent = err.error || t("err_generic", err.detail || "");
+    }
+  };
+
+  $("#pw-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try {
+      await api("/me/password", { method: "PUT", json: {
+        current_password: fd.get("current_password"), new_password: fd.get("new_password"),
+      }});
+      e.target.reset();
+      toast(t("saved"), "success");
+    } catch (err) { apiError(err); }
+  };
+}
+
+/* ---------------- leaderboard ---------------- */
+
+async function renderLeaderboard() {
+  const rows = await api("/leaderboard");
+  const medals = ["🥇", "🥈", "🥉"];
+  $("#app").innerHTML = shell(`
+  <h1>🏆 ${t("leaderboard")}</h1>
+  <div class="card">
+    <table class="lb">
+      <tr><th>${t("lb_rank")}</th><th>${t("lb_user")}</th><th>${t("level")}</th><th>${t("lb_points")}</th></tr>
+      ${rows.map((r) => `<tr>
+        <td class="medal">${medals[r.rank - 1] || "#" + r.rank}</td>
+        <td>${esc(r.name)}${r.name === state.user.name ? " ✦" : ""}</td>
+        <td>⭐ ${r.level}</td><td><b>${r.lifetime_points}</b></td></tr>`).join("")}
+    </table>
+  </div>`);
+}
+
+/* ---------------- handlers (global) ---------------- */
+
+window.FD = {
+  pickMode(el) {
+    document.querySelectorAll("#mode-seg .opt").forEach((o) => o.classList.remove("active"));
+    el.classList.add("active");
+  },
+  removeFile(i) { state.newFiles.splice(i, 1); renderFileChips(); },
+  async quickStart(topicId) { await startSessionFor(topicId, 10); },
+  async startSession(topicId) {
+    const size = parseInt($("#sess-size")?.value || "10", 10);
+    await startSessionFor(topicId, size);
+  },
+  async toggleRefresh(id, on) {
+    try {
+      await api(`/topics/${id}`, { method: "PUT", json: { nightly_refresh: on } });
+      toast(t("saved"), "success");
+    } catch (err) { apiError(err); }
+  },
+  async retryTopic(id) {
+    try { await api(`/topics/${id}/retry`, { method: "POST" }); route(); }
+    catch (err) { apiError(err); }
+  },
+  async deleteTopic(id) {
+    if (!confirm(t("confirm_delete_topic"))) return;
+    try { await api(`/topics/${id}`, { method: "DELETE" }); go("dashboard"); route(); }
+    catch (err) { apiError(err); }
+  },
+  answer(value) { submitAnswer({ answer: value }); },
+  selfGrade(ok) { submitAnswer({ self_grade: ok }); },
+  reveal() {
+    state.study.revealed = true;
+    renderStudy();
+  },
+  showOptions() {
+    state.study.optionsShown = true;
+    renderStudy();
+  },
+  async fifty() {
+    const st = state.study;
+    const card = st.cards[st.idx];
+    try {
+      const res = await api(`/sessions/${st.sessionId}/fifty`, { json: { card_id: card.id } });
+      setPointsPill(res.points);
+      st.fifty[card.id] = res.remove;
+      renderStudy();
+    } catch (err) { apiError(err); }
+  },
+  async skip() {
+    const st = state.study;
+    const card = st.cards[st.idx];
+    try {
+      const res = await api(`/sessions/${st.sessionId}/skip`, { json: { card_id: card.id } });
+      setPointsPill(res.points);
+      st.feedback = { skipped: true, correct: false, points_delta: res.points_delta };
+      renderStudy();
+    } catch (err) { apiError(err); }
+  },
+  next() {
+    const st = state.study;
+    st.feedback = null;
+    st.revealed = false;
+    st.optionsShown = false;
+    if (st.idx === st.cards.length - 1) { finishStudy(); return; }
+    st.idx += 1;
+    renderStudy();
+  },
+  quit() {
+    if (!confirm(t("confirm_quit"))) return;
+    finishStudy();
+  },
+  backToDash() { state.study = null; go("dashboard"); },
+  async logout() {
+    try { await api("/logout", { method: "POST" }); } catch {}
+    state.user = null;
+    go("auth");
+    route();
+  },
+};
+
+/* ---------------- router & boot ---------------- */
+
+async function loadUser() {
+  state.user = await api("/me");
+  applyTheme();
+  localStorage.setItem("fd_lang", state.user.language);
+  localStorage.setItem("fd_theme", state.user.theme);
+}
+
+async function route() {
+  clearTimeout(state.pollTimer);
+  applyTheme();
+  const parts = (location.hash.slice(2) || "dashboard").split("/");
+  if (!state.user) {
+    try { await loadUser(); } catch { renderAuth(); return; }
+  }
+  try {
+    switch (parts[0]) {
+      case "auth": state.user ? go("dashboard") : renderAuth(); break;
+      case "new": renderNew(); break;
+      case "topic": await renderTopic(parseInt(parts[1], 10)); break;
+      case "study": renderStudy(); break;
+      case "settings": renderSettings(); break;
+      case "leaderboard": await renderLeaderboard(); break;
+      default: await renderDashboard();
+    }
+  } catch (err) {
+    if (err?.detail !== "not_authenticated") apiError(err);
+  }
+}
+
+window.addEventListener("hashchange", route);
+route();
