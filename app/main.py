@@ -698,6 +698,67 @@ def admin_users(admin: dict = Depends(auth.current_admin)):
         )
 
 
+@app.get("/api/admin/users/{user_id}")
+def admin_user_profile(user_id: int, admin: dict = Depends(auth.current_admin)):
+    """Profile view: identity + every topic the user created or joined, with the
+    user's own study progress per topic. Password hash is never exposed."""
+    with db.connect() as con:
+        u = db.one(con, "SELECT * FROM users WHERE id=?", (user_id,))
+        if not u:
+            raise HTTPException(404, "user_not_found")
+        info = _public_user(u)
+        info["streak"] = game.current_streak(con, user_id)
+        info["created_at"] = u["created_at"]
+        topics = db.all_rows(
+            con,
+            """SELECT t.*, 'owner' AS role FROM topics t WHERE t.user_id = :uid
+               UNION ALL
+               SELECT t.*, 'member' AS role FROM topics t
+                 JOIN topic_members m ON m.topic_id = t.id AND m.user_id = :uid
+               ORDER BY id DESC""",
+            {"uid": user_id},
+        )
+        out = []
+        for tp in topics:
+            stats = db.one(
+                con,
+                """SELECT
+                     (SELECT COUNT(*) FROM cards c WHERE c.topic_id = :tid) AS total,
+                     (SELECT COUNT(*) FROM card_progress p JOIN cards c ON c.id = p.card_id
+                       WHERE p.user_id = :uid AND c.topic_id = :tid) AS seen,
+                     (SELECT COUNT(*) FROM card_progress p JOIN cards c ON c.id = p.card_id
+                       WHERE p.user_id = :uid AND c.topic_id = :tid AND p.streak > 0) AS mastered,
+                     (SELECT COUNT(*) FROM study_sessions s WHERE s.user_id = :uid
+                       AND s.topic_id = :tid AND s.finished_at IS NOT NULL) AS sessions,
+                     (SELECT COALESCE(SUM(s.points_earned), 0) FROM study_sessions s
+                       WHERE s.user_id = :uid AND s.topic_id = :tid
+                       AND s.finished_at IS NOT NULL) AS points""",
+                {"uid": user_id, "tid": tp["id"]},
+            )
+            out.append({
+                "id": tp["id"], "title": tp["title"] or tp["prompt"][:60],
+                "status": tp["status"], "role": tp["role"], **stats,
+            })
+    return {"user": info, "topics": out}
+
+
+class AdminPasswordBody(BaseModel):
+    password: str = Field(min_length=8, max_length=200)
+
+
+@app.put("/api/admin/users/{user_id}/password")
+def admin_set_password(user_id: int, body: AdminPasswordBody,
+                       admin: dict = Depends(auth.current_admin)):
+    with db.connect() as con:
+        if not db.one(con, "SELECT id FROM users WHERE id=?", (user_id,)):
+            raise HTTPException(404, "user_not_found")
+        con.execute("UPDATE users SET password_hash=? WHERE id=?",
+                    (auth.hash_password(body.password), user_id))
+        # The user must re-authenticate with the new password everywhere.
+        con.execute("DELETE FROM auth_tokens WHERE user_id=?", (user_id,))
+    return {"ok": True}
+
+
 class AdminUserBody(BaseModel):
     is_admin: bool
 
@@ -1270,6 +1331,18 @@ def leaderboard(user: dict = Depends(auth.current_user)):
 
 
 # ---------------------------------------------------------------- static frontend
+
+# Frontend files must revalidate on every load (ETag 304s keep this cheap) —
+# otherwise browsers heuristically cache app.js and run stale frontends after deploys.
+@app.middleware("http")
+async def _no_stale_frontend(request: Request, call_next):
+    response = await call_next(request)
+    content_type = response.headers.get("content-type", "")
+    if (request.url.path.startswith("/static")
+            or content_type.startswith("text/html")):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

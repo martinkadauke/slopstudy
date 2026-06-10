@@ -1032,7 +1032,8 @@ async function renderAdmin() {
   const queueHtml = queue.length ? queue.map((tp, i) => `
     <div class="row spread" style="border-top:1px solid var(--border);padding:10px 0">
       <div>
-        <b>${esc(tp.title)}</b> <span class="badge ${tp.status}">${t("status_" + tp.status)}</span>
+        <b><a href="#/topic/${tp.id}" style="color:inherit">${esc(tp.title)}</a></b>
+        <span class="badge ${tp.status}">${t("status_" + tp.status)}</span>
         ${tp.paused ? `<span class="badge queued">${t("admin_paused")}</span>` : ""}
         <div class="small dim">${t("admin_owner")}: ${esc(tp.owner)}</div>
       </div>
@@ -1060,7 +1061,7 @@ async function renderAdmin() {
 
   const usersHtml = users.map((us) => `
     <tr>
-      <td>${esc(us.name)}${us.id === state.user.id ? ` <span class="dim">(${t("admin_you")})</span>` : ""}
+      <td><a href="#/admin/user/${us.id}"><b>${esc(us.name)}</b></a>${us.id === state.user.id ? ` <span class="dim">(${t("admin_you")})</span>` : ""}
         ${us.is_admin ? "🛡️" : ""}</td>
       <td class="small">${esc(us.email)}</td>
       <td class="small">${us.topics} ${t("admin_topics_count")}</td>
@@ -1248,6 +1249,88 @@ async function renderAdmin() {
   }
 }
 
+/* ---------------- admin: user profile ---------------- */
+
+async function renderAdminUser(id) {
+  const [profile, allTopics] = await Promise.all([
+    api(`/admin/users/${id}`), api("/admin/topics"),
+  ]);
+  const u = profile.user;
+
+  const topicRows = profile.topics.map((tp) => {
+    const pct = tp.total ? Math.round(100 * tp.seen / tp.total) : 0;
+    return `
+    <div style="border-top:1px solid var(--border);padding:12px 0">
+      <div class="row spread">
+        <span>
+          <a href="#/topic/${tp.id}" style="color:inherit"><b>${esc(tp.title)}</b></a>
+          <span class="badge ${tp.role === "owner" ? "mode" : "queued"}">
+            ${tp.role === "owner" ? "✍️ " + t("role_owner") : "👥 " + t("role_member")}</span>
+          <span class="badge ${tp.status}">${t("status_" + tp.status)}</span>
+        </span>
+        ${tp.role === "member"
+          ? `<button class="btn sm ghost" onclick="FD.adminRemoveTopic(${tp.id}, ${id})">${t("remove")}</button>` : ""}
+      </div>
+      <div class="row spread" style="margin-top:6px">
+        <span class="small dim">${t("prof_progress", tp.seen, tp.total)} ·
+          ${tp.mastered} ${t("prof_mastered")} · ${tp.sessions} ${t("total_sessions")} ·
+          ${tp.points} ${t("points")}</span>
+        <span class="small dim">${pct}%</span>
+      </div>
+      <div class="progressbar"><div style="width:${pct}%"></div></div>
+    </div>`;
+  }).join("");
+
+  const have = new Set(profile.topics.map((tp) => tp.id));
+  const assignable = allTopics.filter((tp) => tp.status === "ready" && !have.has(tp.id));
+
+  $("#app").innerHTML = shell(`
+  <h1>👤 ${esc(u.name)} ${u.is_admin ? "🛡️" : ""}</h1>
+  <div class="card">
+    <div class="row">
+      <span class="pill">📧 ${esc(u.email)}</span>
+      <span class="pill">💎 ${u.points}</span>
+      <span class="pill">⭐ ${t("level")} ${u.level.level}</span>
+      ${u.streak ? `<span class="pill">🔥 ${u.streak}</span>` : ""}
+      <span class="pill">📅 ${t("member_since", fmtDate(u.created_at))}</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>📚 ${t("prof_topics")}</h2>
+    ${topicRows || `<p class="small dim">${t("prof_no_topics")}</p>`}
+    ${assignable.length ? `
+      <h3 style="margin-top:16px">➕ ${t("prof_assign")}</h3>
+      <p class="small dim">${t("prof_assign_hint")}</p>
+      <div class="row">
+        <select id="assign-topic" style="flex:1;min-width:200px">
+          ${assignable.map((tp) => `<option value="${tp.id}">${esc(tp.title)} (${esc(tp.owner)})</option>`).join("")}
+        </select>
+        <button class="btn primary" onclick="FD.adminAssignTopic(${id})">${t("prof_assign_btn")}</button>
+      </div>` : ""}
+  </div>
+
+  <form class="card" id="admin-pw-form">
+    <h2>🔒 ${t("prof_set_pw")}</h2>
+    <p class="small dim">${t("prof_pw_hint")}</p>
+    <div class="row">
+      <input type="password" name="password" required minlength="8" autocomplete="new-password"
+        placeholder="${esc(t("password_new"))}" style="flex:1;min-width:200px">
+      <button class="btn primary" type="submit">${t("save")}</button>
+    </div>
+  </form>`);
+
+  $("#admin-pw-form").onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api(`/admin/users/${id}/password`, { method: "PUT",
+        json: { password: e.target.password.value } });
+      e.target.reset();
+      toast(t("pw_set_ok"), "success");
+    } catch (err) { apiError(err); }
+  };
+}
+
 /* ---------------- handlers (global) ---------------- */
 
 window.FD = {
@@ -1333,6 +1416,22 @@ window.FD = {
     if (!confirm(t("confirm_delete_topic"))) return;
     try { await api(`/topics/${id}`, { method: "DELETE" }); renderAdmin(); }
     catch (err) { apiError(err); }
+  },
+  async adminAssignTopic(userId) {
+    const sel = $("#assign-topic");
+    if (!sel) return;
+    try {
+      await api(`/topics/${sel.value}/members`, { json: { user_id: userId } });
+      toast(t("share_added"), "success");
+      renderAdminUser(userId).catch(() => {});
+    } catch (err) { apiError(err); }
+  },
+  async adminRemoveTopic(topicId, userId) {
+    try {
+      await api(`/topics/${topicId}/members/${userId}`, { method: "DELETE" });
+      toast(t("share_removed"), "success");
+      renderAdminUser(userId).catch(() => {});
+    } catch (err) { apiError(err); }
   },
   async setAdmin(id, on) {
     try { await api(`/admin/users/${id}`, { method: "PUT", json: { is_admin: on } }); renderAdmin(); }
@@ -1461,7 +1560,10 @@ async function route() {
       case "study": renderStudy(); break;
       case "settings": renderSettings(); break;
       case "leaderboard": await renderLeaderboard(); break;
-      case "admin": await renderAdmin(); break;
+      case "admin":
+        if (parts[1] === "user" && parts[2]) await renderAdminUser(parseInt(parts[2], 10));
+        else await renderAdmin();
+        break;
       default: await renderDashboard();
     }
   } catch (err) {
