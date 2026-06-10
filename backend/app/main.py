@@ -11,6 +11,7 @@ from slowapi.errors import RateLimitExceeded
 from app.config import settings
 from app.limiter import limiter
 from app.routers import auth, users
+from app.routers.topics import router as topics_router
 
 
 @asynccontextmanager
@@ -35,6 +36,7 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(users.router)
+app.include_router(topics_router)
 
 
 @app.get("/api/health")
