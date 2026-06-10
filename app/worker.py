@@ -259,6 +259,43 @@ def background_paused() -> bool:
         return db.get_setting(con, "background_paused", "0") == "1"
 
 
+class _Paused(Exception):
+    """Raised when a pause is requested mid-item, to abort it without saving."""
+
+
+def _enrich_halted(topic_id: int) -> bool:
+    with db.connect() as con:
+        if db.get_setting(con, "background_paused", "0") == "1":
+            return True
+        row = db.one(con, "SELECT enrich_paused FROM topics WHERE id=?", (topic_id,))
+        return bool(row and row["enrich_paused"])
+
+
+async def _await_or_pause(coro, topic_id: int):
+    """Await an LLM call, but cancel it the moment a pause is requested.
+
+    Cancelling drops the httpx connection so Ollama stops generating (freeing the
+    GPU). The partial result is discarded; because we only persist AFTER this
+    returns, an interrupted item simply stays pending and is redone on resume.
+    """
+    task = asyncio.ensure_future(coro)
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=1.0)
+            if task in done:
+                return task.result()
+            if _enrich_halted(topic_id):
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                raise _Paused()
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
+
+
 async def _enrich_step() -> bool:
     """Do one small chunk of enrichment work. Returns True if something was attempted."""
     if background_paused():
@@ -292,12 +329,14 @@ async def _enrich_step() -> bool:
             with db.connect() as con:
                 srcs = db.all_rows(con, "SELECT * FROM sources WHERE topic_id=?", (topic["id"],))
             results = await websearch.search(f"{plan.get('title', '')} {unit_title}")
-            entry = await llm.generate_unit_material(
-                user, topic, plan, idx, results, extract.combine_sources(srcs))
+            entry = await _await_or_pause(llm.generate_unit_material(
+                user, topic, plan, idx, results, extract.combine_sources(srcs)), topic["id"])
             material.append(entry)
             _fail_counts.pop(key, None)
             log.info("Material for topic %s unit %s done (%s sources)",
                      topic["id"], idx, len(entry["sources"]))
+        except _Paused:
+            return True  # discard the partial unit; redo it on resume
         except Exception as e:
             log.warning("Material for topic %s unit %s failed: %s", topic["id"], idx, e)
             if _record_failure(key):
@@ -327,7 +366,8 @@ async def _enrich_step() -> bool:
             key = f"card:{card['id']}"
             try:
                 results = await websearch.search(f"{topic['title']} {card['question'][:120]}")
-                data = await llm.enrich_card(user, topic, card, results)
+                data = await _await_or_pause(llm.enrich_card(user, topic, card, results),
+                                             topic["id"])
                 with db.connect() as con:
                     con.execute(
                         "UPDATE cards SET long_explanation=?, sources_json=? WHERE id=?",
@@ -335,6 +375,8 @@ async def _enrich_step() -> bool:
                          card["id"]),
                     )
                 _fail_counts.pop(key, None)
+            except _Paused:
+                return True  # this card stays pending; resume picks it up again
             except Exception as e:
                 log.warning("Enriching card %s failed: %s", card["id"], e)
                 if _record_failure(key):
@@ -370,13 +412,15 @@ async def _enrich_step() -> bool:
         base_lang = card["lang"] or topic["language"]
         target = llm.other_lang(base_lang)
         try:
-            translated = await llm.translate_card(user, card, target)
+            translated = await _await_or_pause(llm.translate_card(user, card, target), topic["id"])
             with db.connect() as con:
                 con.execute(
                     "UPDATE cards SET translations_json=? WHERE id=?",
                     (json.dumps({target: translated}, ensure_ascii=False), card["id"]),
                 )
             _fail_counts.pop(key, None)
+        except _Paused:
+            return True  # leave this card untranslated; resume re-does it
         except Exception as e:
             log.warning("Translating card %s failed: %s", card["id"], e)
             if _record_failure(key):

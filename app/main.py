@@ -558,6 +558,11 @@ class BackgroundPauseBody(BaseModel):
 def admin_set_background(body: BackgroundPauseBody, admin: dict = Depends(auth.current_admin)):
     with db.connect() as con:
         db.set_setting(con, "background_paused", "1" if body.paused else "0")
+        if body.paused:
+            # Clear stale "enriching/translating" labels so the UI reflects the pause.
+            con.execute(
+                "UPDATE topics SET progress_msg='' WHERE status='ready' "
+                "AND (progress_msg LIKE 'enriching%' OR progress_msg LIKE 'translating%')")
     return {"ok": True, "paused": body.paused}
 
 

@@ -914,16 +914,20 @@ async function renderAdmin() {
     const parts = [];
     if (it.pending_enrich) parts.push(`📚 ${t("bg_pending", it.pending_enrich)} ${t("bg_explanations")}`);
     if (it.pending_translate) parts.push(`🌐 ${t("bg_pending", it.pending_translate)} ${t("bg_translations")}`);
-    const working = it.activity && (it.activity.startsWith("enriching") || it.activity.startsWith("translating"));
+    // The global pause overrides every item; only show "working" when nothing is paused.
+    const paused = bg.paused || it.enrich_paused;
+    const working = !paused && it.activity &&
+      (it.activity.startsWith("enriching") || it.activity.startsWith("translating"));
     return `<div class="row spread" style="border-top:1px solid var(--border);padding:10px 0">
       <div>
         <b><a href="#/topic/${it.id}" style="color:inherit">${esc(it.title)}</a></b>
         ${working ? `<span class="badge processing">${t("bg_working")}</span>` : ""}
-        ${it.enrich_paused ? `<span class="badge queued">${t("admin_paused")}</span>` : ""}
+        ${paused ? `<span class="badge queued">${t("admin_paused")}</span>` : ""}
         <div class="small dim">${esc(it.owner)} · ${parts.join(" · ") || "—"}</div>
       </div>
       <div class="row">
-        ${it.enrich_paused
+        ${bg.paused ? ""  /* per-item controls are moot while everything is paused */
+          : it.enrich_paused
           ? `<button class="btn sm" onclick="FD.enrichToggle(${it.id},'resume')">▶ ${t("admin_resume")}</button>`
           : `<button class="btn sm ghost" onclick="FD.enrichToggle(${it.id},'pause')">⏸ ${t("admin_pause")}</button>`}
       </div>
