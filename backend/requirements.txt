@@ -7,10 +7,13 @@ alembic
 python-multipart
 httpx
 aiosmtplib
-passlib[bcrypt]
+bcrypt
 python-jose[cryptography]
 PyMuPDF
 python-docx
 beautifulsoup4
 lxml
 slowapi
+pytest
+pytest-asyncio
+anyio[trio]
