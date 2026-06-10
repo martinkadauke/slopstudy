@@ -90,6 +90,64 @@
       "failed": "Fehlgeschlagen"
     }
   },
+  "study": {
+    "title": "Lernmodus",
+    "modeLabel": "Modus",
+    "modes": {
+      "multiple_choice": "Multiple Choice",
+      "exact_answer": "Genaue Antwort",
+      "yes_no": "Ja / Nein",
+      "exam_question": "Prüfungsfragen",
+      "mixed": "Gemischt"
+    },
+    "modeDescriptions": {
+      "multiple_choice": "Wähle die richtige Antwort aus 4 Optionen",
+      "exact_answer": "Gib die genaue Antwort ein",
+      "yes_no": "Antworte mit Ja oder Nein",
+      "exam_question": "Schreibe eine ausführliche Antwort mit KI-Feedback",
+      "mixed": "Zufällige Mischung aller Fragetypen"
+    },
+    "limit": "Kartenanzahl",
+    "limits": {
+      "n": "{{count}} Karten",
+      "all": "Alle"
+    },
+    "start": "Sitzung starten"
+  },
+  "session": {
+    "progress": "{{current}} von {{total}}",
+    "points": "⚡ {{points}} Pkt.",
+    "skip": "Überspringen ({{cost}} Pkt. ausgeben)",
+    "skipAnyway": "Trotzdem überspringen (−{{penalty}} Pkt.)",
+    "submit": "Absenden",
+    "next": "Nächste Karte",
+    "correct": "Richtig!",
+    "incorrect": "Falsch",
+    "correctAnswer": "Richtige Antwort:",
+    "explanation": "Erklärung:",
+    "aiFeedback": "KI-Feedback:",
+    "pointsDelta": "+{{points}} Pkt.",
+    "yes": "Ja",
+    "no": "Nein",
+    "yourAnswer": "Deine Antwort...",
+    "detailedAnswer": "Schreibe eine ausführliche Antwort..."
+  },
+  "summary": {
+    "title": "Sitzung abgeschlossen!",
+    "answered": "Beantwortet",
+    "correct": "Richtig",
+    "skipped": "Übersprungen",
+    "accuracy": "Genauigkeit",
+    "breakdown": "Punkteübersicht",
+    "fromAnswers": "Aus richtigen Antworten",
+    "participation": "Teilnahme-Bonus",
+    "streakBonus": "Streak-Bonus",
+    "spentOnSkips": "Für Überspringen ausgegeben",
+    "total": "Gesamt diese Sitzung",
+    "newBadges": "Neue Abzeichen erhalten!",
+    "studyAgain": "Erneut lernen",
+    "backToTopics": "Zurück zu Themen"
+  },
   "profile": {
     "title": "Profil",
     "username": "Benutzername",
@@ -145,7 +203,13 @@
     "points": "Gesamtpunkte",
     "streak": "Aktueller Streak",
     "sessions": "Gesamtsitzungen",
-    "accuracy": "Durchschnittliche Genauigkeit"
+    "accuracy": "Durchschnittliche Genauigkeit",
+    "pointHistory": "Punkteverlauf",
+    "last30Days": "Letzte 30 Tage",
+    "leaderboard": "Rangliste",
+    "rank": "Rang",
+    "badges": "Abzeichen",
+    "days": "Tage"
   },
   "common": {
     "loading": "Laden...",

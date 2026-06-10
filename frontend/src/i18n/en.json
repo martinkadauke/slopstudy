@@ -90,6 +90,64 @@
       "failed": "Failed"
     }
   },
+  "study": {
+    "title": "Study Mode",
+    "modeLabel": "Mode",
+    "modes": {
+      "multiple_choice": "Multiple Choice",
+      "exact_answer": "Exact Answer",
+      "yes_no": "Yes / No",
+      "exam_question": "Exam Questions",
+      "mixed": "Mixed"
+    },
+    "modeDescriptions": {
+      "multiple_choice": "Select the correct answer from 4 options",
+      "exact_answer": "Type the exact answer",
+      "yes_no": "Answer with Yes or No",
+      "exam_question": "Write a detailed answer with AI feedback",
+      "mixed": "Random mix of all question types"
+    },
+    "limit": "Card Limit",
+    "limits": {
+      "n": "{{count}} cards",
+      "all": "All"
+    },
+    "start": "Start Session"
+  },
+  "session": {
+    "progress": "{{current}} of {{total}}",
+    "points": "⚡ {{points}} pts",
+    "skip": "Skip (spend {{cost}} pts)",
+    "skipAnyway": "Skip anyway (−{{penalty}} pts)",
+    "submit": "Submit",
+    "next": "Next Card",
+    "correct": "Correct!",
+    "incorrect": "Incorrect",
+    "correctAnswer": "Correct answer:",
+    "explanation": "Explanation:",
+    "aiFeedback": "AI Feedback:",
+    "pointsDelta": "+{{points}} pts",
+    "yes": "Yes",
+    "no": "No",
+    "yourAnswer": "Your answer...",
+    "detailedAnswer": "Write a detailed answer..."
+  },
+  "summary": {
+    "title": "Session Complete!",
+    "answered": "Answered",
+    "correct": "Correct",
+    "skipped": "Skipped",
+    "accuracy": "Accuracy",
+    "breakdown": "Points Breakdown",
+    "fromAnswers": "From correct answers",
+    "participation": "Participation bonus",
+    "streakBonus": "Streak bonus",
+    "spentOnSkips": "Spent on skips",
+    "total": "Total this session",
+    "newBadges": "New Badges Earned!",
+    "studyAgain": "Study Again",
+    "backToTopics": "Back to Topics"
+  },
   "profile": {
     "title": "Profile",
     "username": "Username",
@@ -145,7 +203,13 @@
     "points": "Total Points",
     "streak": "Current Streak",
     "sessions": "Total Sessions",
-    "accuracy": "Average Accuracy"
+    "accuracy": "Average Accuracy",
+    "pointHistory": "Point History",
+    "last30Days": "Last 30 days",
+    "leaderboard": "Leaderboard",
+    "rank": "Rank",
+    "badges": "Badges",
+    "days": "days"
   },
   "common": {
     "loading": "Loading...",
