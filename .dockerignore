@@ -1,0 +1,11 @@
+node_modules
+frontend/node_modules
+__pycache__
+.env
+.env.*
+data/
+.git
+.gitignore
+*.md
+.dockerignore
+docker-compose*.yml

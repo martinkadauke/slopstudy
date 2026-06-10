@@ -150,6 +150,9 @@
   },
   "profile": {
     "title": "Profile",
+    "account": "Account",
+    "password": "Password",
+    "preferences": "Preferences",
     "username": "Username",
     "email": "Email",
     "currentPassword": "Current password",
@@ -220,7 +223,8 @@
     "add": "Add",
     "confirm": "Confirm",
     "days": "days",
-    "percent": "%"
+    "percent": "%",
+    "pts": "pts"
   },
   "language": {
     "en": "EN",

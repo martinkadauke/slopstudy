@@ -1,20 +1,27 @@
-# Stage 1: build frontend
-FROM node:20-alpine AS frontend-build
-WORKDIR /app/frontend
-COPY frontend/package.json frontend/package-lock.json* ./
+# Build stage
+FROM node:20-slim AS builder
+WORKDIR /app
+COPY frontend/package*.json ./
 RUN npm ci
-COPY frontend/ .
+COPY frontend/ ./
 RUN npm run build
 
-# Stage 2: runtime
-FROM python:3.12-slim AS runtime
-WORKDIR /app
+# Production stage — non-root nginx on port 8080
+FROM nginx:1.27-bookworm AS runner
 
-COPY backend/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN adduser --system --no-create-home --disabled-login appuser \
+    && chown -R appuser /var/cache/nginx \
+    && chown -R appuser /var/log/nginx \
+    && touch /tmp/nginx.pid \
+    && chown appuser /tmp/nginx.pid
 
-COPY backend/ .
-COPY --from=frontend-build /app/frontend/dist ./app/static
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=builder /app/dist /usr/share/nginx/html
+RUN chown -R appuser /usr/share/nginx/html
 
-EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8080/ || exit 1
+
+USER appuser
+EXPOSE 8080
+CMD ["nginx", "-g", "daemon off; pid /tmp/nginx.pid;"]

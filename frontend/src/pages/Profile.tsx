@@ -105,7 +105,7 @@ export default function Profile() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Account</CardTitle>
+          <CardTitle className="text-base">{t('profile.account')}</CardTitle>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleProfileSave} className="space-y-4">
@@ -137,7 +137,7 @@ export default function Profile() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Password</CardTitle>
+          <CardTitle className="text-base">{t('profile.password')}</CardTitle>
         </CardHeader>
         <CardContent>
           <form onSubmit={handlePasswordSave} className="space-y-4">
@@ -183,7 +183,7 @@ export default function Profile() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Preferences</CardTitle>
+          <CardTitle className="text-base">{t('profile.preferences')}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex items-center justify-between">

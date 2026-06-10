@@ -107,9 +107,9 @@ export default function Settings() {
       <h1 className="text-2xl font-bold mb-6">{t('settings.title')}</h1>
 
       <Tabs defaultValue="ollama">
-        <TabsList className="mb-6">
-          <TabsTrigger value="ollama">{t('settings.ollama.title')}</TabsTrigger>
-          <TabsTrigger value="smtp">{t('settings.smtp.title')}</TabsTrigger>
+        <TabsList className="mb-6 w-full sm:w-auto">
+          <TabsTrigger value="ollama" className="flex-1 sm:flex-none">{t('settings.ollama.title')}</TabsTrigger>
+          <TabsTrigger value="smtp" className="flex-1 sm:flex-none">{t('settings.smtp.title')}</TabsTrigger>
         </TabsList>
 
         <TabsContent value="ollama">

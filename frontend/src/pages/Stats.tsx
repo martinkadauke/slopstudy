@@ -126,6 +126,8 @@ export default function Stats() {
             </CardTitle>
           </CardHeader>
           <CardContent>
+            <div className="overflow-x-auto">
+            <div className="min-w-[320px]">
             <ResponsiveContainer width="100%" height={160}>
               <BarChart data={pointHistory} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
@@ -164,6 +166,8 @@ export default function Stats() {
                 />
               </BarChart>
             </ResponsiveContainer>
+            </div>
+            </div>
           </CardContent>
         </Card>
       )}

@@ -25,7 +25,7 @@ export function MobileHeader() {
         <span className="font-semibold text-base">{t(titleKey)}</span>
       </div>
       <Badge variant="secondary" className="text-xs">
-        {user?.points ?? 0} pts
+        {user?.points ?? 0} {t('common.pts')}
       </Badge>
     </header>
   )
