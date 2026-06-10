@@ -8,6 +8,9 @@ import Login from '@/pages/Login'
 import Register from '@/pages/Register'
 import Topics from '@/pages/Topics'
 import TopicDetail from '@/pages/TopicDetail'
+import StudyMode from '@/pages/StudyMode'
+import SessionPlayer from '@/pages/SessionPlayer'
+import SessionSummary from '@/pages/SessionSummary'
 import Profile from '@/pages/Profile'
 import Settings from '@/pages/Settings'
 import Stats from '@/pages/Stats'
@@ -36,9 +39,14 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
         <Route element={<AuthGuard />}>
+          {/* Full-screen session routes — no nav shell */}
+          <Route path="/sessions/:id" element={<SessionPlayer />} />
+          <Route path="/sessions/:id/summary" element={<SessionSummary />} />
+          {/* Standard shell routes */}
           <Route element={<AppShell />}>
             <Route path="/" element={<Topics />} />
             <Route path="/topics/:id" element={<TopicDetail />} />
+            <Route path="/topics/:id/study" element={<StudyMode />} />
             <Route path="/stats" element={<Stats />} />
             <Route path="/profile" element={<Profile />} />
             <Route path="/settings" element={<Settings />} />
