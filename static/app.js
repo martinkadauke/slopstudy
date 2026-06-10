@@ -112,10 +112,10 @@ function shell(content) {
     <main>${content}</main>
     <nav class="bottomnav">
       ${navLink("dashboard", "nav_dashboard", "🏠")}
-      ${navLink("new", "nav_new", "✨")}
-      ${navLink("leaderboard", "nav_leaderboard", "🏆")}
+      ${navLink("new", "nav_new_short", "✨")}
+      ${navLink("leaderboard", "nav_leaderboard_short", "🏆")}
       ${u.is_admin ? navLink("admin", "nav_admin", "🛡️") : ""}
-      ${navLink("settings", "nav_settings", "⚙️")}
+      ${navLink("settings", "nav_settings_short", "⚙️")}
     </nav>
   </div>`;
 }
@@ -466,9 +466,9 @@ function renderNew() {
     fd.set("mode", $("#mode-seg .opt.active").dataset.mode);
     for (const f of state.newFiles) fd.append("files", f);
     try {
-      await api("/topics", { method: "POST", body: fd });
+      const res = await api("/topics", { method: "POST", body: fd });
       toast("✨ " + t("status_queued"), "success");
-      go("dashboard");
+      go("topic/" + res.topic_id);
     } catch (err) {
       apiError(err);
       btn.disabled = false;
@@ -528,9 +528,9 @@ async function renderTopic(id) {
             ${topic.due_cards ? ` · <b style="color:var(--accent)">${topic.due_cards} ${t("due_now")}</b>` : ""}</div>
           <div class="small dim">${t("topic_stats", topic.stats.sessions, topic.stats.points)}</div>
         </div>
-        <div class="row">
+        <div class="row" style="align-items:flex-end">
           <label class="field" style="margin:0"><span class="small">${t("session_size")}</span>
-            <select id="sess-size"><option>5</option><option selected>10</option><option>15</option><option>20</option></select>
+            <select id="sess-size" style="width:auto;min-width:84px"><option>5</option><option selected>10</option><option>15</option><option>20</option></select>
           </label>
           <button class="btn primary" onclick="FD.startSession(${topic.id})">▶ ${t("start_session")}</button>
         </div>
@@ -649,12 +649,15 @@ async function renderTopic(id) {
   // accordions the user opened so a refresh doesn't collapse what they're reading.
   const openStates = [...document.querySelectorAll("main .unit-body")].map((b) => !b.hidden);
 
+  const dangerHtml = topic.status === "ready"
+    ? `<div class="card row spread">
+        <span class="dim small">${esc(topic.title)}</span>
+        <button class="btn sm danger" onclick="FD.deleteTopic(${topic.id})">🗑 ${t("delete")}</button>
+      </div>` : "";
+
   $("#app").innerHTML = shell(`
-    <div class="row spread">
-      <h1>${esc(topic.title)} <span class="badge mode">${t("mode_" + topic.mode)}</span></h1>
-      ${topic.status === "ready" ? `<button class="btn sm danger right" onclick="FD.deleteTopic(${topic.id})">${t("delete")}</button>` : ""}
-    </div>
-    ${enriching}${actionHtml}${reviseHtml}${materialHtml}${cardsHtml}${planHtml}${sources}`);
+    <h1>${esc(topic.title)} <span class="badge mode">${t("mode_" + topic.mode)}</span></h1>
+    ${enriching}${actionHtml}${materialHtml}${planHtml}${cardsHtml}${reviseHtml}${sources}${dangerHtml}`);
 
   const bodies = document.querySelectorAll("main .unit-body");
   if (bodies.length === openStates.length) {
@@ -689,6 +692,7 @@ async function startSessionFor(topicId, size) {
     const data = await api("/sessions/start", { json: { topic_id: topicId, size } });
     state.study = {
       sessionId: data.session_id, topicTitle: data.topic_title,
+      topicId, size,
       cards: data.cards, idx: 0, feedback: null, summary: null,
       fifty: {}, optionsShown: false,
     };
@@ -779,9 +783,9 @@ function renderStudy() {
 
   $("#app").innerHTML = shell(`
   <div class="study-wrap">
-    <div class="row spread">
-      <span class="dim small">${esc(st.topicTitle)} — ${t("card_x_of_y", st.idx + 1, st.cards.length)}</span>
-      <a href="#" class="small" onclick="event.preventDefault();FD.quit()">${t("quit_session")}</a>
+    <div class="row spread" style="flex-wrap:nowrap">
+      <span class="dim small truncate">${esc(st.topicTitle)} — ${t("card_x_of_y", st.idx + 1, st.cards.length)}</span>
+      <a href="#" class="small" style="white-space:nowrap" onclick="event.preventDefault();FD.quit()">${t("quit_session")}</a>
     </div>
     <div class="progressbar" style="margin-top:8px"><div style="width:${Math.round(100 * st.idx / st.cards.length)}%"></div></div>
     <div class="qcard">
@@ -832,7 +836,8 @@ function renderSummary() {
         <div class="progressbar"><div style="width:${Math.round(100 * s.level.progress)}%"></div></div>
       </div>
       ${s.streak ? `<p>🔥 ${s.streak} ${t("streak_days")}</p>` : ""}
-      <button class="btn primary block" onclick="FD.backToDash()">${t("back_dashboard")}</button>
+      <button class="btn primary block" onclick="FD.studyAgain()">🔁 ${t("study_again")}</button>
+      <button class="btn ghost block" style="margin-top:8px" onclick="FD.backToDash()">${t("back_dashboard")}</button>
     </div>
   </div>`);
 }
@@ -878,16 +883,14 @@ function renderSettings() {
       <label class="field" style="flex:1;min-width:200px"><span>${t("email")}</span>
         <input type="email" name="email" value="${esc(u.email)}" required></label>
     </div>
-    <div class="row" style="margin-bottom:14px">
-      <label class="field" style="flex:1;min-width:160px;margin:0"><span>${t("language")}</span>
-        <select name="language">
-          <option value="en" ${u.language === "en" ? "selected" : ""}>English</option>
-          <option value="de" ${u.language === "de" ? "selected" : ""}>Deutsch</option>
-        </select></label>
-      <label class="switch" style="margin-top:20px">
-        <input type="checkbox" name="theme_dark" ${u.theme === "dark" ? "checked" : ""}>
-        <span class="track"></span> 🌙 ${t("appearance_dark")}</label>
-    </div>
+    <label class="field" style="max-width:340px"><span>${t("language")}</span>
+      <select name="language">
+        <option value="en" ${u.language === "en" ? "selected" : ""}>English</option>
+        <option value="de" ${u.language === "de" ? "selected" : ""}>Deutsch</option>
+      </select></label>
+    <label class="switch" style="margin-bottom:12px">
+      <input type="checkbox" name="theme_dark" ${u.theme === "dark" ? "checked" : ""}>
+      <span class="track"></span> 🌙 ${t("appearance_dark")}</label>
     <label class="switch" style="margin-bottom:16px">
       <input type="checkbox" name="email_notifications" ${u.email_notifications ? "checked" : ""} ${u.smtp_enabled ? "" : "disabled"}>
       <span class="track"></span> 📧 ${t("notifications")} ${u.smtp_enabled ? "" : `<span class="dim small">${t("smtp_disabled_hint")}</span>`}</label>
@@ -1318,6 +1321,11 @@ window.FD = {
     finishStudy();
   },
   backToDash() { state.study = null; go("dashboard"); },
+  async studyAgain() {
+    const st = state.study;
+    state.study = null;
+    await startSessionFor(st.topicId, st.size);
+  },
   async logout() {
     try { await api("/logout", { method: "POST" }); } catch {}
     state.user = null;

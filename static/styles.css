@@ -79,10 +79,36 @@ a:hover { text-decoration: underline; }
 }
 .pill .ico { font-size: 15px; }
 
+/* boot splash while the SPA makes its first request */
+.boot { display: flex; justify-content: center; padding: 38vh 0; }
+.spinner {
+  width: 34px; height: 34px; border-radius: 50%;
+  border: 3px solid var(--border); border-top-color: var(--accent);
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
 /* mobile bottom nav */
 .bottomnav { display: none; }
 @media (max-width: 720px) {
   .topbar nav { display: none; }
+  .shell { padding: 0 14px 96px; }
+  h1 { font-size: 20px; margin: 12px 0 10px; }
+  .card { padding: 16px; }
+  .topbar { padding: 10px 0; gap: 8px; flex-wrap: nowrap; }
+  .logo { font-size: 19px; white-space: nowrap; }
+  .statpills { margin-left: auto; gap: 5px; }
+  .pill { padding: 4px 9px; font-size: 12px; box-shadow: none; }
+  .qcard { padding: 20px 16px; }
+  .question { font-size: 18px; }
+  .choice { padding: 12px 13px; font-size: 14px; }
+  .summary-stats { gap: 8px; }
+  .summary-stats .stat b { font-size: 20px; }
+  .bars .bar span { font-size: 9px; }
+  .toast { max-width: calc(100vw - 28px); }
+  .seg .opt small { font-size: 11px; }
   .bottomnav {
     display: flex; position: fixed; bottom: 0; left: 0; right: 0; z-index: 40;
     background: var(--bg-card); border-top: 1px solid var(--border);
@@ -90,8 +116,8 @@ a:hover { text-decoration: underline; }
   }
   .bottomnav a {
     display: flex; flex-direction: column; align-items: center; gap: 2px;
-    color: var(--text-dim); font-size: 11px; font-weight: 600; padding: 4px 10px;
-    border-radius: 10px;
+    color: var(--text-dim); font-size: 10px; font-weight: 600; padding: 4px 6px;
+    border-radius: 10px; white-space: nowrap;
   }
   .bottomnav a.active { color: var(--accent); }
   .bottomnav a .ico { font-size: 20px; }
@@ -124,7 +150,8 @@ input[type="text"], input[type="email"], input[type="password"], input[type="num
 input[type="url"], textarea, select {
   width: 100%; padding: 11px 13px; border-radius: var(--radius-sm);
   border: 1.5px solid var(--border); background: var(--bg-inset); color: var(--text);
-  font-family: var(--font); font-size: 15px; outline: none;
+  /* 16px minimum: anything smaller makes iOS Safari auto-zoom on focus. */
+  font-family: var(--font); font-size: 16px; outline: none;
   transition: border-color .15s;
 }
 input:focus, textarea:focus, select:focus { border-color: var(--accent); }
@@ -270,8 +297,15 @@ table.lb .medal { font-size: 18px; }
   table.lb .btn.sm { padding: 6px 10px; font-size: 12px; white-space: nowrap; }
 }
 
-.bars { display: flex; align-items: flex-end; gap: 6px; height: 90px; margin-top: 10px; }
-.bars .bar { flex: 1; background: var(--accent-grad); border-radius: 6px 6px 2px 2px; min-height: 3px; position: relative; }
+.bars {
+  display: flex; align-items: flex-end; gap: 8px; height: 90px; margin-top: 10px;
+  border-bottom: 1px solid var(--border); padding: 0 4px;
+}
+.bars .bar {
+  flex: 1; max-width: 52px;  /* a single-day week must not become a giant slab */
+  background: var(--accent-grad); border-radius: 6px 6px 2px 2px;
+  min-height: 3px; position: relative;
+}
 .bars .bar span { position: absolute; bottom: -20px; left: 0; right: 0; text-align: center; font-size: 10px; color: var(--text-dim); }
 
 #toast-root { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); z-index: 100; display: flex; flex-direction: column; gap: 8px; }

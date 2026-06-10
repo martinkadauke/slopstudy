@@ -407,7 +407,13 @@ def list_topics(user: dict = Depends(auth.current_user)):
     with db.connect() as con:
         topics = db.all_rows(
             con, "SELECT * FROM topics WHERE user_id=? ORDER BY id DESC", (user["id"],))
-        return [_topic_summary(con, t) for t in topics]
+        out = []
+        for topic in topics:
+            summary = _topic_summary(con, topic)
+            if topic["status"] == "ready":
+                summary["due_cards"] = _count_due(con, user["id"], topic["id"])
+            out.append(summary)
+        return out
 
 
 def _own_topic(con, topic_id: int, user: dict) -> dict:
