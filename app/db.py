@@ -117,6 +117,11 @@ CREATE INDEX IF NOT EXISTS idx_topics_user ON topics(user_id);
 CREATE INDEX IF NOT EXISTS idx_cards_topic ON cards(topic_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON study_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_answer_log_user ON answer_log(user_id, answered_at);
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_revisions_topic ON topic_revisions(topic_id);
 """
 
@@ -133,6 +138,7 @@ MIGRATIONS = [
     ("topics", "queue_priority", "INTEGER NOT NULL DEFAULT 0"),
     ("topics", "paused", "INTEGER NOT NULL DEFAULT 0"),
     ("topics", "cancel_requested", "INTEGER NOT NULL DEFAULT 0"),
+    ("topics", "enrich_paused", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "last_report_at", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "is_admin", "INTEGER NOT NULL DEFAULT 0"),
     ("study_sessions", "jokers_json", "TEXT NOT NULL DEFAULT '{}'"),
@@ -162,6 +168,7 @@ def init():
             existing = [r[1] for r in con.execute(f"PRAGMA table_info({table})")]
             if col not in existing:
                 con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+        _seed_ollama_settings(con)
 
 
 @contextmanager
@@ -182,6 +189,47 @@ def connect():
 
 def now() -> int:
     return int(time.time())
+
+
+DEFAULT_OLLAMA_URL = "http://host.docker.internal:11434"
+DEFAULT_OLLAMA_MODEL = "llama3.1"
+
+
+def ollama_config(con) -> dict:
+    """The single, admin-managed Ollama connection (shared by all users)."""
+    return {
+        "ollama_url": get_setting(con, "ollama_url", DEFAULT_OLLAMA_URL),
+        "ollama_model": get_setting(con, "ollama_model", DEFAULT_OLLAMA_MODEL),
+        "ollama_api_key": get_setting(con, "ollama_api_key", ""),
+    }
+
+
+def _seed_ollama_settings(con):
+    """First run after the per-user→global move: adopt an existing user's Ollama
+    config (prefer an admin, else the first user) so deployments keep working."""
+    if get_setting(con, "ollama_url"):
+        return
+    row = con.execute(
+        """SELECT ollama_url, ollama_model, ollama_api_key FROM users
+           WHERE ollama_url != '' ORDER BY is_admin DESC, id LIMIT 1"""
+    ).fetchone()
+    if row and row["ollama_url"]:
+        set_setting(con, "ollama_url", row["ollama_url"])
+        set_setting(con, "ollama_model", row["ollama_model"])
+        set_setting(con, "ollama_api_key", row["ollama_api_key"])
+
+
+def get_setting(con, key: str, default: str = "") -> str:
+    row = con.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(con, key: str, value: str):
+    con.execute(
+        "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value),
+    )
 
 
 def one(con, sql, params=()):

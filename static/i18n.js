@@ -186,6 +186,17 @@ window.I18N = {
     admin_topics_count: "topics",
     admin_you: "you",
     confirm_stop: "Stop this topic's generation?",
+
+    admin_background: "Background AI work",
+    admin_bg_desc: "Deep explanations and EN/DE translations the AI generates after a deck is ready. This work uses your Ollama GPU.",
+    admin_bg_all_paused: "All background AI work is paused.",
+    admin_bg_pause_all: "Pause all",
+    admin_bg_resume_all: "Resume all",
+    admin_bg_idle: "Nothing pending — all decks are fully enriched and translated.",
+    bg_explanations: "explanations",
+    bg_translations: "translations",
+    bg_pending: "{a} pending",
+    bg_working: "working…",
   },
 
   de: {
@@ -375,5 +386,16 @@ window.I18N = {
     admin_topics_count: "Themen",
     admin_you: "du",
     confirm_stop: "Generierung dieses Themas stoppen?",
+
+    admin_background: "KI-Hintergrundarbeit",
+    admin_bg_desc: "Tiefe Erklärungen und DE/EN-Übersetzungen, die die KI nach Fertigstellung eines Stapels erzeugt. Diese Arbeit nutzt deine Ollama-GPU.",
+    admin_bg_all_paused: "Alle KI-Hintergrundarbeit ist pausiert.",
+    admin_bg_pause_all: "Alles pausieren",
+    admin_bg_resume_all: "Alles fortsetzen",
+    admin_bg_idle: "Nichts ausstehend — alle Stapel sind vollständig angereichert und übersetzt.",
+    bg_explanations: "Erklärungen",
+    bg_translations: "Übersetzungen",
+    bg_pending: "{a} ausstehend",
+    bg_working: "arbeitet…",
   },
 };

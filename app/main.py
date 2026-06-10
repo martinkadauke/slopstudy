@@ -107,8 +107,6 @@ def _public_user(user: dict) -> dict:
     return {
         "id": user["id"], "email": user["email"], "name": user["name"],
         "language": user["language"], "theme": user["theme"],
-        "ollama_url": user["ollama_url"], "ollama_model": user["ollama_model"],
-        "ollama_api_key_set": bool(user["ollama_api_key"]),
         "email_notifications": bool(user["email_notifications"]),
         "points": user["points"], "lifetime_points": user["lifetime_points"],
         "level": info, "smtp_enabled": emailer.smtp_configured(),
@@ -182,25 +180,36 @@ class OllamaBody(BaseModel):
     ollama_api_key: str | None = None  # None = keep existing
 
 
-@app.put("/api/me/ollama")
-def update_ollama(body: OllamaBody, user: dict = Depends(auth.current_user)):
+# The Ollama connection is shared infrastructure — only admins manage it.
+
+@app.get("/api/admin/ollama")
+def get_ollama(admin: dict = Depends(auth.current_admin)):
+    with db.connect() as con:
+        cfg = db.ollama_config(con)
+    return {
+        "ollama_url": cfg["ollama_url"], "ollama_model": cfg["ollama_model"],
+        "ollama_api_key_set": bool(cfg["ollama_api_key"]),
+    }
+
+
+@app.put("/api/admin/ollama")
+def set_ollama(body: OllamaBody, admin: dict = Depends(auth.current_admin)):
     if not re.match(r"^https?://", body.ollama_url):
         raise HTTPException(422, "invalid_url")
     with db.connect() as con:
-        con.execute("UPDATE users SET ollama_url=?, ollama_model=? WHERE id=?",
-                    (body.ollama_url.rstrip("/"), body.ollama_model.strip(), user["id"]))
+        db.set_setting(con, "ollama_url", body.ollama_url.rstrip("/"))
+        db.set_setting(con, "ollama_model", body.ollama_model.strip())
         if body.ollama_api_key is not None:
-            con.execute("UPDATE users SET ollama_api_key=? WHERE id=?",
-                        (body.ollama_api_key.strip(), user["id"]))
+            db.set_setting(con, "ollama_api_key", body.ollama_api_key.strip())
     return {"ok": True}
 
 
-@app.post("/api/ollama/test")
-async def test_ollama(user: dict = Depends(auth.current_user)):
+@app.post("/api/admin/ollama/test")
+async def test_ollama(admin: dict = Depends(auth.current_admin)):
     with db.connect() as con:
-        full = db.one(con, "SELECT * FROM users WHERE id=?", (user["id"],))
+        cfg = db.ollama_config(con)
     try:
-        return await llm.test_connection(full)
+        return await llm.test_connection(cfg)
     except llm.OllamaError as e:
         return JSONResponse(status_code=502, content={"ok": False, "error": str(e)})
 
@@ -479,6 +488,57 @@ def admin_reorder(body: QueueOrderBody, admin: dict = Depends(auth.current_admin
     with db.connect() as con:
         for priority, topic_id in enumerate(body.order):
             con.execute("UPDATE topics SET queue_priority=? WHERE id=?", (priority, topic_id))
+    return {"ok": True}
+
+
+# -------- background AI work (deep explanations + translations) visibility & control
+
+@app.get("/api/admin/background")
+def admin_background(admin: dict = Depends(auth.current_admin)):
+    """Per-topic pending enrichment/translation counts + current activity + pause state."""
+    with db.connect() as con:
+        paused = db.get_setting(con, "background_paused", "0") == "1"
+        rows = db.all_rows(
+            con,
+            """SELECT t.id, t.title, t.prompt, t.progress_msg, t.enrich_paused, u.name AS owner,
+                      (SELECT COUNT(*) FROM cards c WHERE c.topic_id=t.id AND c.sources_json='')
+                        AS pending_enrich,
+                      (SELECT COUNT(*) FROM cards c WHERE c.topic_id=t.id
+                        AND c.sources_json!='' AND c.translations_json='') AS pending_translate
+               FROM topics t JOIN users u ON u.id=t.user_id
+               WHERE t.status='ready' AND t.plan_json!=''
+               ORDER BY t.id DESC""",
+        )
+    items = [
+        {
+            "id": r["id"], "title": r["title"] or r["prompt"][:60], "owner": r["owner"],
+            "pending_enrich": r["pending_enrich"], "pending_translate": r["pending_translate"],
+            "enrich_paused": bool(r["enrich_paused"]), "activity": r["progress_msg"],
+        }
+        for r in rows
+        if r["pending_enrich"] or r["pending_translate"] or r["enrich_paused"] or r["progress_msg"]
+    ]
+    return {"paused": paused, "items": items}
+
+
+class BackgroundPauseBody(BaseModel):
+    paused: bool
+
+
+@app.post("/api/admin/background")
+def admin_set_background(body: BackgroundPauseBody, admin: dict = Depends(auth.current_admin)):
+    with db.connect() as con:
+        db.set_setting(con, "background_paused", "1" if body.paused else "0")
+    return {"ok": True, "paused": body.paused}
+
+
+@app.post("/api/admin/topics/{topic_id}/enrich/{action}")
+def admin_enrich_toggle(topic_id: int, action: str, admin: dict = Depends(auth.current_admin)):
+    if action not in ("pause", "resume"):
+        raise HTTPException(404, "unknown_action")
+    with db.connect() as con:
+        con.execute("UPDATE topics SET enrich_paused=? WHERE id=?",
+                    (1 if action == "pause" else 0, topic_id))
     return {"ok": True}
 
 

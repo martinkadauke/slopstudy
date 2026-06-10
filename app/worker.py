@@ -77,6 +77,12 @@ def _is_cancelled(topic_id: int) -> bool:
     return bool(row and row["cancel_requested"])
 
 
+def _ollama_actor(con, user):
+    """Overlay the admin-managed global Ollama connection onto a user dict, so the
+    LLM client always uses the shared endpoint regardless of who owns the topic."""
+    return {**user, **db.ollama_config(con)} if user else user
+
+
 def _insert_card(con, topic_id: int, unit_index: int, lang: str, card: dict):
     con.execute(
         """INSERT INTO cards (topic_id, unit_index, type, question, answer,
@@ -99,7 +105,7 @@ def _update(topic_id: int, **fields):
 async def _process(topic: dict):
     topic_id = topic["id"]
     with db.connect() as con:
-        user = db.one(con, "SELECT * FROM users WHERE id=?", (topic["user_id"],))
+        user = _ollama_actor(con, db.one(con, "SELECT * FROM users WHERE id=?", (topic["user_id"],)))
         sources = db.all_rows(con, "SELECT * FROM sources WHERE topic_id=?", (topic_id,))
     if not user:
         _update(topic_id, status="failed", error="user deleted")
@@ -177,7 +183,7 @@ async def _process_revision() -> bool:
         if not rev:
             return False
         topic = db.one(con, "SELECT * FROM topics WHERE id=?", (rev["topic_id"],))
-        user = db.one(con, "SELECT * FROM users WHERE id=?", (rev["user_id"],))
+        user = _ollama_actor(con, db.one(con, "SELECT * FROM users WHERE id=?", (rev["user_id"],)))
         con.execute("UPDATE topic_revisions SET status='processing' WHERE id=?", (rev["id"],))
     if not topic or not user or not topic["plan_json"]:
         with db.connect() as con:
@@ -248,13 +254,20 @@ def _record_failure(key: str) -> bool:
     return False
 
 
+def background_paused() -> bool:
+    with db.connect() as con:
+        return db.get_setting(con, "background_paused", "0") == "1"
+
+
 async def _enrich_step() -> bool:
     """Do one small chunk of enrichment work. Returns True if something was attempted."""
+    if background_paused():
+        return False
     with db.connect() as con:
         topic = db.one(
             con,
             """SELECT t.*, u.id AS uid FROM topics t JOIN users u ON u.id=t.user_id
-               WHERE t.status='ready' AND t.plan_json != '' AND (
+               WHERE t.status='ready' AND t.plan_json != '' AND t.enrich_paused=0 AND (
                  t.material_json = ''
                  OR EXISTS (SELECT 1 FROM cards c WHERE c.topic_id=t.id AND c.sources_json='')
                  OR EXISTS (SELECT 1 FROM cards c WHERE c.topic_id=t.id
@@ -263,7 +276,7 @@ async def _enrich_step() -> bool:
         )
         if not topic:
             return False
-        user = db.one(con, "SELECT * FROM users WHERE id=?", (topic["user_id"],))
+        user = _ollama_actor(con, db.one(con, "SELECT * FROM users WHERE id=?", (topic["user_id"],)))
 
     plan = json.loads(topic["plan_json"])
     material = json.loads(topic["material_json"]) if topic["material_json"] else None
@@ -391,6 +404,8 @@ async def _maybe_refresh_topics() -> bool:
     coaching: practice where it hurts); falls back to round-robin when there is
     no answer history. New cards enter the normal enrichment pipeline.
     """
+    if background_paused():
+        return False
     now = datetime.now()
     if now.hour < REPORT_HOUR:
         return False
@@ -404,7 +419,7 @@ async def _maybe_refresh_topics() -> bool:
         )
         if not topic:
             return False
-        user = db.one(con, "SELECT * FROM users WHERE id=?", (topic["user_id"],))
+        user = _ollama_actor(con, db.one(con, "SELECT * FROM users WHERE id=?", (topic["user_id"],)))
     key = f"refresh:{topic['id']}"
     plan = json.loads(topic["plan_json"])
     try:
@@ -517,7 +532,9 @@ async def _send_report_for(user: dict):
     cards_block = "\n\n".join(blocks)
 
     try:
-        body = await llm.generate_weakness_report(user, cards_block)
+        with db.connect() as con:
+            actor = _ollama_actor(con, user)
+        body = await llm.generate_weakness_report(actor, cards_block)
     except Exception as e:
         log.warning("LLM report for user %s failed (%s), using template fallback", user["id"], e)
         body = emailer.fallback_report_body(user, weak)

@@ -724,24 +724,6 @@ function renderSettings() {
     <button class="btn primary" type="submit">${t("save")}</button>
   </form>
 
-  <form class="card" id="ollama-form">
-    <h2>🦙 ${t("ollama")}</h2>
-    <label class="field"><span>${t("ollama_url")}</span>
-      <input type="text" name="ollama_url" value="${esc(u.ollama_url)}" required>
-      <small class="dim">${t("ollama_url_hint")}</small></label>
-    <div class="row">
-      <label class="field" style="flex:1;min-width:180px"><span>${t("ollama_model")}</span>
-        <input type="text" name="ollama_model" value="${esc(u.ollama_model)}" required></label>
-      <label class="field" style="flex:2;min-width:220px"><span>${t("ollama_key")}</span>
-        <input type="password" name="ollama_api_key" placeholder="${u.ollama_api_key_set ? t("ollama_key_keep") : ""}"></label>
-    </div>
-    <div class="row">
-      <button class="btn primary" type="submit">${t("save")}</button>
-      <button class="btn ghost" type="button" id="test-btn">🔌 ${t("test_connection")}</button>
-    </div>
-    <p class="small" id="test-result" style="margin-bottom:0"></p>
-  </form>
-
   <form class="card" id="pw-form">
     <h2>🔒 ${t("change_password")}</h2>
     <div class="row">
@@ -783,40 +765,6 @@ function renderSettings() {
     } catch (err) { apiError(err); }
   };
 
-  $("#ollama-form").onsubmit = async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    try {
-      await api("/me/ollama", { method: "PUT", json: {
-        ollama_url: fd.get("ollama_url"), ollama_model: fd.get("ollama_model"),
-        ollama_api_key: fd.get("ollama_api_key") || null,
-      }});
-      await loadUser();
-      toast(t("saved"), "success");
-    } catch (err) { apiError(err); }
-  };
-
-  $("#test-btn").onclick = async () => {
-    const out = $("#test-result");
-    out.textContent = t("testing");
-    out.style.color = "";
-    try {
-      const res = await api("/ollama/test", { method: "POST" });
-      if (res.ok) {
-        out.style.color = res.model_available ? "var(--ok)" : "var(--warn)";
-        out.textContent = res.model_available
-          ? t("conn_ok", state.user.ollama_model)
-          : t("conn_ok_no_model", state.user.ollama_model, res.models.join(", ") || "—");
-      } else {
-        out.style.color = "var(--bad)";
-        out.textContent = res.error;
-      }
-    } catch (err) {
-      out.style.color = "var(--bad)";
-      out.textContent = err.error || t("err_generic", err.detail || "");
-    }
-  };
-
   $("#pw-form").onsubmit = async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -838,20 +786,22 @@ async function renderLeaderboard() {
   $("#app").innerHTML = shell(`
   <h1>🏆 ${t("leaderboard")}</h1>
   <div class="card">
-    <table class="lb">
+    <div class="scroll-x"><table class="lb">
       <tr><th>${t("lb_rank")}</th><th>${t("lb_user")}</th><th>${t("level")}</th><th>${t("lb_points")}</th></tr>
       ${rows.map((r) => `<tr>
         <td class="medal">${medals[r.rank - 1] || "#" + r.rank}</td>
         <td>${esc(r.name)}${r.name === state.user.name ? " ✦" : ""}</td>
         <td>⭐ ${r.level}</td><td><b>${r.lifetime_points}</b></td></tr>`).join("")}
-    </table>
+    </table></div>
   </div>`);
 }
 
 /* ---------------- admin ---------------- */
 
 async function renderAdmin() {
-  const [topics, users] = await Promise.all([api("/admin/topics"), api("/admin/users")]);
+  const [topics, users, bg, ollama] = await Promise.all([
+    api("/admin/topics"), api("/admin/users"), api("/admin/background"), api("/admin/ollama"),
+  ]);
   state.adminTopics = topics;
 
   // Generation queue: anything still queued or processing, in processing order.
@@ -896,33 +846,123 @@ async function renderAdmin() {
         : `<button class="btn sm" onclick="FD.setAdmin(${us.id},true)">${t("admin_make_admin")}</button>`)}</td>
     </tr>`).join("");
 
+  const bgItems = bg.items.map((it) => {
+    const parts = [];
+    if (it.pending_enrich) parts.push(`📚 ${t("bg_pending", it.pending_enrich)} ${t("bg_explanations")}`);
+    if (it.pending_translate) parts.push(`🌐 ${t("bg_pending", it.pending_translate)} ${t("bg_translations")}`);
+    const working = it.activity && (it.activity.startsWith("enriching") || it.activity.startsWith("translating"));
+    return `<div class="row spread" style="border-top:1px solid var(--border);padding:10px 0">
+      <div>
+        <b><a href="#/topic/${it.id}" style="color:inherit">${esc(it.title)}</a></b>
+        ${working ? `<span class="badge processing">${t("bg_working")}</span>` : ""}
+        ${it.enrich_paused ? `<span class="badge queued">${t("admin_paused")}</span>` : ""}
+        <div class="small dim">${esc(it.owner)} · ${parts.join(" · ") || "—"}</div>
+      </div>
+      <div class="row">
+        ${it.enrich_paused
+          ? `<button class="btn sm" onclick="FD.enrichToggle(${it.id},'resume')">▶ ${t("admin_resume")}</button>`
+          : `<button class="btn sm ghost" onclick="FD.enrichToggle(${it.id},'pause')">⏸ ${t("admin_pause")}</button>`}
+      </div>
+    </div>`;
+  }).join("");
+
   $("#app").innerHTML = shell(`
   <h1>🛡️ ${t("admin_title")}</h1>
+  <form class="card" id="ollama-form">
+    <h2>🦙 ${t("ollama")}</h2>
+    <label class="field"><span>${t("ollama_url")}</span>
+      <input type="text" name="ollama_url" value="${esc(ollama.ollama_url)}" required>
+      <small class="dim">${t("ollama_url_hint")}</small></label>
+    <div class="row">
+      <label class="field" style="flex:1;min-width:180px"><span>${t("ollama_model")}</span>
+        <input type="text" name="ollama_model" value="${esc(ollama.ollama_model)}" required></label>
+      <label class="field" style="flex:2;min-width:220px"><span>${t("ollama_key")}</span>
+        <input type="password" name="ollama_api_key" placeholder="${ollama.ollama_api_key_set ? t("ollama_key_keep") : ""}"></label>
+    </div>
+    <div class="row">
+      <button class="btn primary" type="submit">${t("save")}</button>
+      <button class="btn ghost" type="button" id="test-btn">🔌 ${t("test_connection")}</button>
+    </div>
+    <p class="small" id="test-result" style="margin-bottom:0"></p>
+  </form>
+  <div class="card">
+    <div class="row spread">
+      <h2 style="margin:0">🧠 ${t("admin_background")}</h2>
+      <button class="btn sm ${bg.paused ? "ok" : "ghost"}" onclick="FD.bgPauseAll(${!bg.paused})">
+        ${bg.paused ? "▶ " + t("admin_bg_resume_all") : "⏸ " + t("admin_bg_pause_all")}</button>
+    </div>
+    <p class="small dim">${t("admin_bg_desc")}</p>
+    ${bg.paused ? `<div class="hintbox">⏸ ${t("admin_bg_all_paused")}</div>` : ""}
+    ${bgItems || `<p class="dim small">${t("admin_bg_idle")}</p>`}
+  </div>
   <div class="card">
     <h2>⏱️ ${t("admin_queue")}</h2>
     ${queueHtml}
   </div>
   <div class="card">
     <h2>👥 ${t("admin_users")}</h2>
-    <table class="lb">
+    <div class="scroll-x"><table class="lb">
       <tr><th>${t("lb_user")}</th><th>${t("email")}</th><th></th><th></th></tr>
       ${usersHtml}
-    </table>
+    </table></div>
   </div>
   <div class="card">
     <h2>📚 ${t("admin_all_topics")}</h2>
-    <table class="lb">
+    <div class="scroll-x"><table class="lb">
       <tr><th>${t("your_topics")}</th><th>${t("admin_owner")}</th><th></th><th></th><th></th></tr>
       ${topicsHtml}
-    </table>
+    </table></div>
   </div>`);
 
-  // Live-refresh while the queue is active.
-  if (queue.some((tp) => tp.status === "processing")) {
+  $("#ollama-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try {
+      await api("/admin/ollama", { method: "PUT", json: {
+        ollama_url: fd.get("ollama_url"), ollama_model: fd.get("ollama_model"),
+        ollama_api_key: fd.get("ollama_api_key") || null,
+      }});
+      toast(t("saved"), "success");
+    } catch (err) { apiError(err); }
+  };
+  $("#test-btn").onclick = async () => {
+    const out = $("#test-result");
+    out.textContent = t("testing");
+    out.style.color = "";
+    const model = $("#ollama-form [name=ollama_model]").value;
+    try {
+      const res = await api("/admin/ollama/test", { method: "POST" });
+      if (res.ok) {
+        out.style.color = res.model_available ? "var(--ok)" : "var(--warn)";
+        out.textContent = res.model_available
+          ? t("conn_ok", model)
+          : t("conn_ok_no_model", model, res.models.join(", ") || "—");
+      } else {
+        out.style.color = "var(--bad)";
+        out.textContent = res.error;
+      }
+    } catch (err) {
+      out.style.color = "var(--bad)";
+      out.textContent = err.error || t("err_generic", err.detail || "");
+    }
+  };
+
+  // Live-refresh while the queue OR background AI work is active.
+  const bgActive = !bg.paused && bg.items.some(
+    (it) => it.pending_enrich || it.pending_translate);
+  if (queue.some((tp) => tp.status === "processing") || bgActive) {
     clearTimeout(state.pollTimer);
-    state.pollTimer = setTimeout(() => {
-      if ((location.hash.slice(2) || "").startsWith("admin")) renderAdmin().catch(() => {});
-    }, 4000);
+    const tick = () => {
+      if (!(location.hash.slice(2) || "").startsWith("admin")) return;
+      // Don't clobber a field the admin is typing in (e.g. the Ollama form) — retry later.
+      const el = document.activeElement;
+      if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) {
+        state.pollTimer = setTimeout(tick, 4000);
+        return;
+      }
+      renderAdmin().catch(() => {});
+    };
+    state.pollTimer = setTimeout(tick, 4000);
   }
 }
 
@@ -965,6 +1005,14 @@ window.FD = {
   },
   async setAdmin(id, on) {
     try { await api(`/admin/users/${id}`, { method: "PUT", json: { is_admin: on } }); renderAdmin(); }
+    catch (err) { apiError(err); }
+  },
+  async bgPauseAll(on) {
+    try { await api("/admin/background", { json: { paused: on } }); renderAdmin(); }
+    catch (err) { apiError(err); }
+  },
+  async enrichToggle(id, action) {
+    try { await api(`/admin/topics/${id}/enrich/${action}`, { method: "POST" }); renderAdmin(); }
     catch (err) { apiError(err); }
   },
   async queueMove(id, dir) {

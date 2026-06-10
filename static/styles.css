@@ -258,9 +258,17 @@ textarea { resize: vertical; min-height: 100px; }
 
 /* ---------- misc ---------- */
 table.lb { width: 100%; border-collapse: collapse; }
-table.lb th, table.lb td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+table.lb th, table.lb td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: middle; }
 table.lb tr:last-child td { border-bottom: none; }
 table.lb .medal { font-size: 18px; }
+/* Wrap tables so wide rows scroll horizontally instead of overflowing the card. */
+.scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+@media (max-width: 720px) {
+  table.lb { min-width: 460px; }            /* keep columns readable; container scrolls */
+  table.lb th, table.lb td { padding: 9px 10px; }
+  table.lb .btn.sm { padding: 6px 10px; font-size: 12px; white-space: nowrap; }
+}
 
 .bars { display: flex; align-items: flex-end; gap: 6px; height: 90px; margin-top: 10px; }
 .bars .bar { flex: 1; background: var(--accent-grad); border-radius: 6px 6px 2px 2px; min-height: 3px; position: relative; }
