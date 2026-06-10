@@ -122,6 +122,13 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS topic_members (
+    topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    added_at INTEGER NOT NULL,
+    PRIMARY KEY (topic_id, user_id)
+);
+
 CREATE TABLE IF NOT EXISTS password_resets (
     token_hash TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -211,13 +218,22 @@ DEFAULT_OLLAMA_URL = "http://host.docker.internal:11434"
 DEFAULT_OLLAMA_MODEL = "llama3.1"
 
 
-def ollama_config(con) -> dict:
-    """The single, admin-managed Ollama connection (shared by all users)."""
-    return {
+# AI task families that can each run on their own (e.g. smaller/faster) model.
+OLLAMA_TASKS = ("generate", "enrich", "translate", "report")
+
+
+def ollama_config(con, task: str | None = None) -> dict:
+    """The admin-managed Ollama connection; per-task model override if configured."""
+    cfg = {
         "ollama_url": get_setting(con, "ollama_url", DEFAULT_OLLAMA_URL),
         "ollama_model": get_setting(con, "ollama_model", DEFAULT_OLLAMA_MODEL),
         "ollama_api_key": get_setting(con, "ollama_api_key", ""),
     }
+    if task in OLLAMA_TASKS:
+        override = get_setting(con, f"ollama_model_{task}", "")
+        if override:
+            cfg["ollama_model"] = override
+    return cfg
 
 
 def _seed_ollama_settings(con):

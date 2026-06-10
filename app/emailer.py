@@ -1,5 +1,6 @@
 """SMTP notification mail, configured via environment variables (see .env.example)."""
 import asyncio
+import html as html_mod
 import logging
 import os
 import smtplib
@@ -119,9 +120,53 @@ def password_reset_email(lang: str, name: str, link: str) -> tuple[str, str]:
     return s["subject"], s["body"].format(name=name, link=link)
 
 
-def send_invitation_sync(to_addr: str, subject: str, body: str):
+# ------------------------------------------------------------------ HTML layer
+
+_CTA_OPEN = {"en": "Open SlopStudy", "de": "SlopStudy öffnen"}
+
+
+def wrap_html(heading: str, text_body: str, cta_text: str | None = None,
+              cta_url: str | None = None) -> str:
+    """Wrap a plain-text body in the SlopStudy look: dark card, gradient brand,
+    gradient CTA button. Inline styles only (email clients strip <style>)."""
+    paragraphs = "".join(
+        f'<p style="margin:0 0 14px;">{html_mod.escape(p).replace(chr(10), "<br>")}</p>'
+        for p in text_body.split("\n\n") if p.strip()
+    )
+    cta = ""
+    if cta_text and cta_url:
+        cta = (
+            f'<div style="text-align:center;margin:24px 0 6px;">'
+            f'<a href="{html_mod.escape(cta_url, quote=True)}" '
+            f'style="display:inline-block;background:linear-gradient(135deg,#6d5cff,#b14bf4);'
+            f'background-color:#7d5cff;color:#ffffff;text-decoration:none;font-weight:700;'
+            f'font-size:15px;padding:13px 26px;border-radius:12px;">'
+            f'{html_mod.escape(cta_text)}</a></div>'
+        )
+    return f"""<!DOCTYPE html>
+<html><body style="margin:0;padding:0;background-color:#12121c;">
+<div style="background-color:#12121c;padding:28px 12px;">
+  <div style="max-width:540px;margin:0 auto;font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+    <div style="text-align:center;padding-bottom:18px;font-size:24px;font-weight:800;">
+      <span style="color:#9b6dff;">🎴 SlopStudy</span>
+    </div>
+    <div style="background-color:#1c1c2b;border:1px solid #2e2e45;border-radius:18px;padding:28px 26px;color:#ececf5;font-size:15px;line-height:1.65;">
+      <h2 style="margin:0 0 16px;font-size:19px;color:#ffffff;">{html_mod.escape(heading)}</h2>
+      {paragraphs}
+      {cta}
+    </div>
+    <p style="text-align:center;color:#9a9ab5;font-size:12px;margin-top:16px;">
+      SlopStudy — AI flashcards, self-hosted.
+    </p>
+  </div>
+</div>
+</body></html>"""
+
+
+def send_invitation_sync(to_addr: str, subject: str, body: str,
+                         cta_text: str | None = None, cta_url: str | None = None):
     """Synchronous send, used from the admin request handler (small, blocking)."""
-    _send_sync(to_addr, subject, body)
+    _send_sync(to_addr, subject, body, html=wrap_html(subject, body, cta_text, cta_url))
 
 
 def _report_strings(user: dict) -> dict:
@@ -148,9 +193,12 @@ async def send_weakness_report(user: dict, body: str, n_weak: int):
     s = _report_strings(user)
     link = os.environ.get("APP_BASE_URL", "http://localhost:8000").rstrip("/")
     subject = s["subject"].format(n=n_weak)
+    full_body = body + s["footer"].format(link=link)
+    cta = _CTA_OPEN.get(user.get("language", "en"), _CTA_OPEN["en"])
+    html = wrap_html(subject, full_body, cta, link)
     try:
         await asyncio.get_running_loop().run_in_executor(
-            None, _send_sync, user["email"], subject, body + s["footer"].format(link=link)
+            None, _send_sync, user["email"], subject, full_body, html
         )
         log.info("Sent weakness report to %s", user["email"])
     except Exception:
@@ -161,7 +209,7 @@ def smtp_configured() -> bool:
     return bool(os.environ.get("SMTP_HOST"))
 
 
-def _send_sync(to_addr: str, subject: str, body: str):
+def _send_sync(to_addr: str, subject: str, body: str, html: str | None = None):
     host = os.environ["SMTP_HOST"]
     port = int(os.environ.get("SMTP_PORT", "587"))
     user = os.environ.get("SMTP_USER", "")
@@ -173,7 +221,9 @@ def _send_sync(to_addr: str, subject: str, body: str):
     msg["From"] = from_addr
     msg["To"] = to_addr
     msg["Subject"] = subject
-    msg.set_content(body)
+    msg.set_content(body)  # plain-text fallback for strict clients
+    if html:
+        msg.add_alternative(html, subtype="html")
 
     if security == "ssl":
         server = smtplib.SMTP_SSL(host, port, timeout=30)
@@ -210,9 +260,11 @@ async def _send_templated(user: dict, subject_key: str, body_key: str, **kwargs)
     link = os.environ.get("APP_BASE_URL", "http://localhost:8000").rstrip("/")
     subject = tpl[subject_key].format(**kwargs, name=user["name"], link=link)
     body = tpl[body_key].format(**kwargs, name=user["name"], link=link)
+    cta = _CTA_OPEN.get(user.get("language", "en"), _CTA_OPEN["en"])
+    html = wrap_html(subject, body, cta, link)
     try:
         await asyncio.get_running_loop().run_in_executor(
-            None, _send_sync, user["email"], subject, body
+            None, _send_sync, user["email"], subject, body, html
         )
         log.info("Sent notification mail to %s", user["email"])
     except Exception:

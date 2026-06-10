@@ -240,6 +240,34 @@ window.I18N = {
     confirm_delete_card: "Delete this card permanently?",
     card_deleted: "Card deleted",
     kbd_hint: "Keyboard: 1–4 choose · Enter next",
+
+    shared_with: "Shared with",
+    shared_hint: "Invited users can study this deck and see its material — editing stays with you.",
+    share_search_ph: "Find user by name or email…",
+    share_added: "Added to the topic",
+    share_removed: "Removed",
+    shared_by: "shared by {a}",
+    remove: "Remove",
+    no_members: "Not shared with anyone yet.",
+    no_user_found: "No matching user found.",
+
+    ai_status: "AI status",
+    ai_explanations: "Deep explanations",
+    ai_translations: "Translations",
+    ai_complete: "All AI work for this deck is done.",
+    ai_paused_note: "Background AI work is currently paused.",
+
+    mode_change_label: "Question mode for new questions",
+    mode_changed: "Question mode updated — applies to newly generated questions.",
+    mode_change_hint: "Affects nightly fresh questions and AI edits; existing cards keep their format.",
+
+    model_per_task: "Models per task",
+    model_per_task_hint: "Optionally run lighter tasks on smaller, faster models. Empty = default model.",
+    model_task_generate: "Generation (plans, cards, edits)",
+    model_task_enrich: "Explanations & learning material",
+    model_task_translate: "Translations",
+    model_task_report: "Weakness reports",
+    model_default_ph: "default model",
   },
 
   de: {
@@ -483,5 +511,33 @@ window.I18N = {
     confirm_delete_card: "Diese Karte endgültig löschen?",
     card_deleted: "Karte gelöscht",
     kbd_hint: "Tastatur: 1–4 wählen · Enter weiter",
+
+    shared_with: "Geteilt mit",
+    shared_hint: "Eingeladene Nutzer können diesen Stapel lernen und das Material sehen — bearbeiten kannst nur du.",
+    share_search_ph: "Nutzer per Name oder E-Mail suchen…",
+    share_added: "Zum Thema hinzugefügt",
+    share_removed: "Entfernt",
+    shared_by: "geteilt von {a}",
+    remove: "Entfernen",
+    no_members: "Noch mit niemandem geteilt.",
+    no_user_found: "Kein passender Nutzer gefunden.",
+
+    ai_status: "KI-Status",
+    ai_explanations: "Tiefe Erklärungen",
+    ai_translations: "Übersetzungen",
+    ai_complete: "Alle KI-Arbeit für diesen Stapel ist fertig.",
+    ai_paused_note: "KI-Hintergrundarbeit ist gerade pausiert.",
+
+    mode_change_label: "Fragemodus für neue Fragen",
+    mode_changed: "Fragemodus aktualisiert — gilt für neu generierte Fragen.",
+    mode_change_hint: "Wirkt auf nächtliche neue Fragen und KI-Änderungen; bestehende Karten behalten ihr Format.",
+
+    model_per_task: "Modelle pro Aufgabe",
+    model_per_task_hint: "Leichtere Aufgaben optional auf kleineren, schnelleren Modellen ausführen. Leer = Standardmodell.",
+    model_task_generate: "Generierung (Pläne, Karten, Änderungen)",
+    model_task_enrich: "Erklärungen & Lernmaterial",
+    model_task_translate: "Übersetzungen",
+    model_task_report: "Lernreports",
+    model_default_ph: "Standardmodell",
   },
 };

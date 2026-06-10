@@ -154,6 +154,11 @@ input[type="url"], textarea, select {
   font-family: var(--font); font-size: 16px; outline: none;
   transition: border-color .15s;
 }
+/* One shared control height so buttons, inputs and selects line up pixel-perfect
+   when they sit in the same row. (Textareas keep their natural height.) */
+input[type="text"], input[type="email"], input[type="password"], input[type="number"],
+input[type="url"], select { height: 46px; }
+.btn:not(.sm) { min-height: 46px; }
 input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 textarea { resize: vertical; min-height: 100px; }
 

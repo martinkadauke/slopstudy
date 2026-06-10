@@ -324,7 +324,8 @@ function progressLabel(topic) {
 
 function topicCardHtml(topic) {
   const badge = `<span class="badge ${topic.status}">${t("status_" + topic.status)}</span>`;
-  const mode = `<span class="badge mode">${t("mode_" + topic.mode)}</span>`;
+  const mode = `<span class="badge mode">${t("mode_" + topic.mode)}</span>`
+    + (topic.shared ? ` <span class="badge queued">👥 ${esc(topic.owner_name)}</span>` : "");
   let body = "";
   if (topic.status === "processing" || topic.status === "queued") {
     body = `
@@ -496,9 +497,10 @@ function renderFileChips() {
 async function renderTopic(id) {
   const topic = await api("/topics/" + id);
   if (topic.status === "ready" || topic.status === "stopped") {
-    [topic.revisions, topic.cards] = await Promise.all([
-      api(`/topics/${id}/revisions`).catch(() => []),
+    [topic.revisions, topic.cards, topic.members] = await Promise.all([
+      topic.is_owner ? api(`/topics/${id}/revisions`).catch(() => []) : Promise.resolve([]),
       api(`/topics/${id}/cards`).catch(() => []),
+      topic.is_owner ? api(`/topics/${id}/members`).catch(() => []) : Promise.resolve(null),
     ]);
   }
   state.topic = topic;
@@ -535,12 +537,13 @@ async function renderTopic(id) {
           <button class="btn primary" onclick="FD.startSession(${topic.id})">▶ ${t("start_session")}</button>
         </div>
       </div>
+      ${topic.is_owner ? `
       <label class="switch" style="margin-top:14px" title="${esc(t("nightly_refresh_hint"))}">
         <input type="checkbox" ${topic.nightly_refresh ? "checked" : ""}
           onchange="FD.toggleRefresh(${topic.id}, this.checked)">
         <span class="track"></span> 🌙 ${t("nightly_refresh")}
       </label>
-      <p class="small dim" style="margin:6px 0 0">${t("nightly_refresh_hint")}</p>
+      <p class="small dim" style="margin:6px 0 0">${t("nightly_refresh_hint")}</p>` : ""}
     </div>`;
   } else if (topic.status === "failed") {
     actionHtml = `<div class="card">
@@ -596,11 +599,54 @@ async function renderTopic(id) {
     : topic.status === "ready" && pm.startsWith("translating")
     ? `<p class="small dim">🌐 ${t("translating_note")}</p>` : "";
 
+  // Live AI progress for this deck (deep explanations + translations).
+  let aiHtml = "";
+  if (topic.status === "ready" && topic.ai && topic.ai.total > 0) {
+    const ai = topic.ai;
+    const allDone = ai.enriched >= ai.total && ai.translated >= ai.total;
+    const bar = (label, done, total) => `
+      <div class="row spread" style="margin-top:8px">
+        <span class="small">${label}</span><span class="small dim">${done}/${total}</span>
+      </div>
+      <div class="progressbar"><div style="width:${Math.round(100 * done / total)}%"></div></div>`;
+    aiHtml = `<div class="card">
+      <h2>🤖 ${t("ai_status")}</h2>
+      ${allDone ? `<p class="small dim" style="margin-bottom:0">✅ ${t("ai_complete")}</p>` : `
+        ${bar("📚 " + t("ai_explanations"), ai.enriched, ai.total)}
+        ${bar("🌐 " + t("ai_translations"), ai.translated, ai.total)}
+        ${pm.startsWith("enriching") || pm.startsWith("translating")
+          ? `<p class="small dim" style="margin:10px 0 0">⚙️ ${pm.startsWith("translating") ? t("translating_note") : t("enriching_note")}</p>` : ""}`}
+    </div>`;
+  }
+
+  // Sharing (owner/admin only): invite existing users to study this deck.
+  let membersHtml = "";
+  if (topic.is_owner && topic.members !== null && topic.members !== undefined) {
+    const rows = topic.members.map((m) => `
+      <div class="row spread" style="border-top:1px solid var(--border);padding:8px 0">
+        <span class="small"><b>${esc(m.name)}</b> <span class="dim">${esc(m.email)}</span></span>
+        <button class="btn sm ghost" onclick="FD.removeMember(${topic.id}, ${m.id})">${t("remove")}</button>
+      </div>`).join("");
+    membersHtml = `<div class="card">
+      <h2>👥 ${t("shared_with")}</h2>
+      <p class="small dim">${t("shared_hint")}</p>
+      <input type="text" id="member-search" placeholder="${esc(t("share_search_ph"))}"
+        autocomplete="off" oninput="FD.searchUsers(${topic.id}, this.value)">
+      <div id="member-results"></div>
+      ${rows || `<p class="small dim" style="margin:10px 0 0">${t("no_members")}</p>`}
+    </div>`;
+  }
+
   let reviseHtml = "";
-  if (topic.status === "ready" || topic.status === "stopped") {
+  if ((topic.status === "ready" || topic.status === "stopped") && topic.is_owner) {
     const revs = topic.revisions || [];
+    const modeOptions = MODES.map((m) =>
+      `<option value="${m}" ${topic.mode === m ? "selected" : ""}>${t("mode_" + m)}</option>`).join("");
     reviseHtml = `<div class="card">
       <h2>✏️ ${t("revise_title")}</h2>
+      <label class="field" style="max-width:340px"><span>${t("mode_change_label")}</span>
+        <select onchange="FD.changeMode(${topic.id}, this.value)">${modeOptions}</select></label>
+      <p class="small dim" style="margin-top:-6px">${t("mode_change_hint")}</p>
       <p class="small dim">${t("revise_hint")}</p>
       <form id="revise-form" data-topic="${topic.id}">
         <textarea name="instruction" rows="2" required minlength="3" maxlength="1000"
@@ -625,7 +671,7 @@ async function renderTopic(id) {
           <span class="badge diff">U${c.unit_index + 1} · ${"●".repeat(c.difficulty)}</span>
           ${esc(c.question)}
         </span>
-        <button class="btn sm danger" onclick="FD.deleteCard(${c.id}, ${topic.id})">✕</button>
+        ${topic.is_owner ? `<button class="btn sm danger" onclick="FD.deleteCard(${c.id}, ${topic.id})">✕</button>` : ""}
       </div>`).join("");
     cardsHtml = `<div class="card">
       <div class="unit" style="margin-bottom:0">
@@ -649,15 +695,18 @@ async function renderTopic(id) {
   // accordions the user opened so a refresh doesn't collapse what they're reading.
   const openStates = [...document.querySelectorAll("main .unit-body")].map((b) => !b.hidden);
 
-  const dangerHtml = topic.status === "ready"
+  const dangerHtml = topic.status === "ready" && topic.is_owner
     ? `<div class="card row spread">
         <span class="dim small">${esc(topic.title)}</span>
         <button class="btn sm danger" onclick="FD.deleteTopic(${topic.id})">🗑 ${t("delete")}</button>
       </div>` : "";
 
+  const sharedBadge = !topic.is_owner
+    ? ` <span class="badge queued">👥 ${t("shared_by", esc(topic.owner_name))}</span>` : "";
+
   $("#app").innerHTML = shell(`
-    <h1>${esc(topic.title)} <span class="badge mode">${t("mode_" + topic.mode)}</span></h1>
-    ${enriching}${actionHtml}${materialHtml}${planHtml}${cardsHtml}${reviseHtml}${sources}${dangerHtml}`);
+    <h1>${esc(topic.title)} <span class="badge mode">${t("mode_" + topic.mode)}</span>${sharedBadge}</h1>
+    ${enriching}${actionHtml}${aiHtml}${materialHtml}${planHtml}${cardsHtml}${reviseHtml}${membersHtml}${sources}${dangerHtml}`);
 
   const bodies = document.querySelectorAll("main .unit-body");
   if (bodies.length === openStates.length) {
@@ -1022,8 +1071,8 @@ async function renderAdmin() {
 
   const bgItems = bg.items.map((it) => {
     const parts = [];
-    if (it.pending_enrich) parts.push(`📚 ${t("bg_pending", it.pending_enrich)} ${t("bg_explanations")}`);
-    if (it.pending_translate) parts.push(`🌐 ${t("bg_pending", it.pending_translate)} ${t("bg_translations")}`);
+    if (it.pending_enrich) parts.push(`📚 ${t("bg_explanations")} ${it.enrich_done}/${it.total}`);
+    if (it.pending_translate) parts.push(`🌐 ${t("bg_translations")} ${it.translate_done}/${it.total}`);
     // The global pause overrides every item; only show "working" when nothing is paused.
     const paused = bg.paused || it.enrich_paused;
     const working = !paused && it.activity &&
@@ -1085,6 +1134,14 @@ async function renderAdmin() {
       <label class="field" style="flex:2;min-width:220px"><span>${t("ollama_key")}</span>
         <input type="password" name="ollama_api_key" placeholder="${ollama.ollama_api_key_set ? t("ollama_key_keep") : ""}"></label>
     </div>
+    <h3 style="margin-top:14px">${t("model_per_task")}</h3>
+    <p class="small dim">${t("model_per_task_hint")}</p>
+    <div class="row">
+      ${["generate", "enrich", "translate", "report"].map((task) => `
+        <label class="field" style="flex:1;min-width:200px"><span>${t("model_task_" + task)}</span>
+          <input type="text" name="model_${task}" value="${esc(ollama.task_models[task] || "")}"
+            placeholder="${esc(t("model_default_ph"))}"></label>`).join("")}
+    </div>
     <div class="row">
       <button class="btn primary" type="submit">${t("save")}</button>
       <button class="btn ghost" type="button" id="test-btn">🔌 ${t("test_connection")}</button>
@@ -1140,6 +1197,12 @@ async function renderAdmin() {
       await api("/admin/ollama", { method: "PUT", json: {
         ollama_url: fd.get("ollama_url"), ollama_model: fd.get("ollama_model"),
         ollama_api_key: fd.get("ollama_api_key") || null,
+        task_models: {
+          generate: fd.get("model_generate") || "",
+          enrich: fd.get("model_enrich") || "",
+          translate: fd.get("model_translate") || "",
+          report: fd.get("model_report") || "",
+        },
       }});
       toast(t("saved"), "success");
     } catch (err) { apiError(err); }
@@ -1211,6 +1274,41 @@ window.FD = {
     document.querySelectorAll("#card-list .cardrow").forEach((row) => {
       row.style.display = !needle || row.dataset.q.includes(needle) ? "" : "none";
     });
+  },
+  async changeMode(id, mode) {
+    try {
+      await api(`/topics/${id}`, { method: "PUT", json: { mode } });
+      toast(t("mode_changed"), "success");
+    } catch (err) { apiError(err); }
+  },
+  searchUsers(topicId, value) {
+    clearTimeout(state.searchTimer);
+    const box = $("#member-results");
+    if (!value || value.trim().length < 2) { if (box) box.innerHTML = ""; return; }
+    state.searchTimer = setTimeout(async () => {
+      try {
+        const users = await api("/users/search?q=" + encodeURIComponent(value.trim()));
+        if (!box) return;
+        box.innerHTML = users.length
+          ? users.map((us) => `<button class="btn sm ghost" style="margin:6px 6px 0 0"
+              onclick="FD.addMember(${topicId}, ${us.id})">➕ ${esc(us.name)} <span class="dim">(${esc(us.email)})</span></button>`).join("")
+          : `<p class="small dim" style="margin:8px 0 0">${t("no_user_found")}</p>`;
+      } catch (err) { apiError(err); }
+    }, 250);
+  },
+  async addMember(topicId, userId) {
+    try {
+      await api(`/topics/${topicId}/members`, { json: { user_id: userId } });
+      toast(t("share_added"), "success");
+      renderTopic(topicId).catch(() => {});
+    } catch (err) { apiError(err); }
+  },
+  async removeMember(topicId, userId) {
+    try {
+      await api(`/topics/${topicId}/members/${userId}`, { method: "DELETE" });
+      toast(t("share_removed"), "success");
+      renderTopic(topicId).catch(() => {});
+    } catch (err) { apiError(err); }
   },
   async toggleRefresh(id, on) {
     try {

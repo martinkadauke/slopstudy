@@ -183,9 +183,11 @@ def forgot_password(body: ForgotBody, request: Request):
     if user and emailer.smtp_configured():
         base = os.environ.get("APP_BASE_URL", "http://localhost:8000").rstrip("/")
         try:
+            reset_link = f"{base}/#/reset/{token}"
             subject, text = emailer.password_reset_email(
-                user["language"], user["name"], f"{base}/#/reset/{token}")
-            emailer.send_invitation_sync(user["email"], subject, text)
+                user["language"], user["name"], reset_link)
+            cta = "Neues Passwort setzen" if user["language"] == "de" else "Set new password"
+            emailer.send_invitation_sync(user["email"], subject, text, cta, reset_link)
         except Exception:
             log.exception("Failed to send reset mail to %s", user["email"])
     return {"ok": True}
@@ -299,6 +301,7 @@ class OllamaBody(BaseModel):
     ollama_url: str = Field(min_length=1, max_length=300)
     ollama_model: str = Field(min_length=1, max_length=100)
     ollama_api_key: str | None = None  # None = keep existing
+    task_models: dict[str, str] | None = None  # per-task overrides, "" = default
 
 
 # The Ollama connection is shared infrastructure — only admins manage it.
@@ -307,9 +310,12 @@ class OllamaBody(BaseModel):
 def get_ollama(admin: dict = Depends(auth.current_admin)):
     with db.connect() as con:
         cfg = db.ollama_config(con)
+        task_models = {t: db.get_setting(con, f"ollama_model_{t}", "")
+                       for t in db.OLLAMA_TASKS}
     return {
         "ollama_url": cfg["ollama_url"], "ollama_model": cfg["ollama_model"],
         "ollama_api_key_set": bool(cfg["ollama_api_key"]),
+        "task_models": task_models,
     }
 
 
@@ -322,6 +328,10 @@ def set_ollama(body: OllamaBody, admin: dict = Depends(auth.current_admin)):
         db.set_setting(con, "ollama_model", body.ollama_model.strip())
         if body.ollama_api_key is not None:
             db.set_setting(con, "ollama_api_key", body.ollama_api_key.strip())
+        if body.task_models is not None:
+            for task in db.OLLAMA_TASKS:
+                db.set_setting(con, f"ollama_model_{task}",
+                               str(body.task_models.get(task, "")).strip())
     return {"ok": True}
 
 
@@ -406,10 +416,18 @@ def _topic_summary(con, topic: dict) -> dict:
 def list_topics(user: dict = Depends(auth.current_user)):
     with db.connect() as con:
         topics = db.all_rows(
-            con, "SELECT * FROM topics WHERE user_id=? ORDER BY id DESC", (user["id"],))
+            con,
+            """SELECT t.*, u.name AS owner_name FROM topics t JOIN users u ON u.id=t.user_id
+               WHERE t.user_id = :uid
+                  OR t.id IN (SELECT topic_id FROM topic_members WHERE user_id = :uid)
+               ORDER BY t.id DESC""",
+            {"uid": user["id"]},
+        )
         out = []
         for topic in topics:
             summary = _topic_summary(con, topic)
+            summary["shared"] = topic["user_id"] != user["id"]
+            summary["owner_name"] = topic["owner_name"]
             if topic["status"] == "ready":
                 summary["due_cards"] = _count_due(con, user["id"], topic["id"])
             out.append(summary)
@@ -428,11 +446,40 @@ def _own_topic(con, topic_id: int, user: dict) -> dict:
     return topic
 
 
+def _accessible_topic(con, topic_id: int, user: dict) -> tuple[dict, bool]:
+    """Topic the user may study: owner/admin (editable) or shared member (read).
+
+    Returns (topic, is_owner)."""
+    topic = db.one(con, "SELECT * FROM topics WHERE id=?", (topic_id,))
+    if not topic:
+        raise HTTPException(404, "topic_not_found")
+    if user.get("is_admin") or topic["user_id"] == user["id"]:
+        return topic, True
+    member = db.one(con, "SELECT 1 AS x FROM topic_members WHERE topic_id=? AND user_id=?",
+                    (topic_id, user["id"]))
+    if not member:
+        raise HTTPException(404, "topic_not_found")
+    return topic, False
+
+
 @app.get("/api/topics/{topic_id}")
 def get_topic(topic_id: int, user: dict = Depends(auth.current_user)):
     with db.connect() as con:
-        topic = _own_topic(con, topic_id, user)
+        topic, is_owner = _accessible_topic(con, topic_id, user)
         out = _topic_summary(con, topic)
+        out["is_owner"] = is_owner
+        owner = db.one(con, "SELECT name FROM users WHERE id=?", (topic["user_id"],))
+        out["owner_name"] = owner["name"] if owner else "?"
+        # Live progress of background AI work (incl. translations) for this deck.
+        out["ai"] = db.one(
+            con,
+            """SELECT COUNT(*) AS total,
+                      COALESCE(SUM(long_explanation != ''), 0) AS enriched,
+                      COALESCE(SUM(translations_json NOT IN ('', '{}')), 0) AS translated
+               FROM cards WHERE topic_id=?""",
+            (topic_id,),
+        )
+        out["ai"]["activity"] = topic["progress_msg"]
         out["plan"] = json.loads(topic["plan_json"]) if topic["plan_json"] else None
         out["material"] = json.loads(topic["material_json"]) if topic["material_json"] else []
         out["sources"] = [
@@ -451,7 +498,8 @@ def get_topic(topic_id: int, user: dict = Depends(auth.current_user)):
 
 
 class TopicSettingsBody(BaseModel):
-    nightly_refresh: bool
+    nightly_refresh: bool | None = None
+    mode: str | None = None  # applies to newly generated questions
 
 
 @app.put("/api/topics/{topic_id}")
@@ -459,9 +507,73 @@ def update_topic(topic_id: int, body: TopicSettingsBody,
                  user: dict = Depends(auth.current_user)):
     with db.connect() as con:
         _own_topic(con, topic_id, user)
-        con.execute("UPDATE topics SET nightly_refresh=? WHERE id=?",
-                    (int(body.nightly_refresh), topic_id))
+        if body.nightly_refresh is not None:
+            con.execute("UPDATE topics SET nightly_refresh=? WHERE id=?",
+                        (int(body.nightly_refresh), topic_id))
+        if body.mode is not None:
+            if body.mode not in VALID_MODES:
+                raise HTTPException(422, "invalid_mode")
+            con.execute("UPDATE topics SET mode=? WHERE id=?", (body.mode, topic_id))
     return {"ok": True}
+
+
+# -------------------------------------------------- topic sharing
+
+@app.get("/api/topics/{topic_id}/members")
+def list_members(topic_id: int, user: dict = Depends(auth.current_user)):
+    with db.connect() as con:
+        _own_topic(con, topic_id, user)
+        return db.all_rows(
+            con,
+            """SELECT u.id, u.name, u.email FROM topic_members m
+               JOIN users u ON u.id = m.user_id WHERE m.topic_id=? ORDER BY u.name""",
+            (topic_id,),
+        )
+
+
+class MemberBody(BaseModel):
+    user_id: int
+
+
+@app.post("/api/topics/{topic_id}/members")
+def add_member(topic_id: int, body: MemberBody, user: dict = Depends(auth.current_user)):
+    with db.connect() as con:
+        topic = _own_topic(con, topic_id, user)
+        if body.user_id == topic["user_id"]:
+            raise HTTPException(409, "already_member")
+        if not db.one(con, "SELECT id FROM users WHERE id=?", (body.user_id,)):
+            raise HTTPException(404, "user_not_found")
+        con.execute(
+            """INSERT INTO topic_members (topic_id, user_id, added_at) VALUES (?,?,?)
+               ON CONFLICT(topic_id, user_id) DO NOTHING""",
+            (topic_id, body.user_id, db.now()),
+        )
+    return {"ok": True}
+
+
+@app.delete("/api/topics/{topic_id}/members/{member_id}")
+def remove_member(topic_id: int, member_id: int, user: dict = Depends(auth.current_user)):
+    with db.connect() as con:
+        _own_topic(con, topic_id, user)
+        con.execute("DELETE FROM topic_members WHERE topic_id=? AND user_id=?",
+                    (topic_id, member_id))
+    return {"ok": True}
+
+
+@app.get("/api/users/search")
+def search_users(q: str = "", user: dict = Depends(auth.current_user)):
+    """Find existing users to share a topic with (small instance, names are public
+    on the leaderboard anyway)."""
+    needle = f"%{q.strip()}%"
+    if len(q.strip()) < 2:
+        return []
+    with db.connect() as con:
+        return db.all_rows(
+            con,
+            """SELECT id, name, email FROM users
+               WHERE (name LIKE ? OR email LIKE ?) AND id != ? LIMIT 8""",
+            (needle, needle, user["id"]),
+        )
 
 
 @app.delete("/api/topics/{topic_id}")
@@ -515,9 +627,9 @@ def revise_topic(topic_id: int, body: ReviseBody, user: dict = Depends(auth.curr
 
 @app.get("/api/topics/{topic_id}/cards")
 def list_topic_cards(topic_id: int, user: dict = Depends(auth.current_user)):
-    """Card inventory for the deck owner/admin (browse + prune bad cards)."""
+    """Card inventory: members may browse; deleting stays owner/admin-only."""
     with db.connect() as con:
-        _own_topic(con, topic_id, user)
+        _accessible_topic(con, topic_id, user)
         return db.all_rows(
             con,
             """SELECT id, unit_index, type, question, difficulty,
@@ -654,6 +766,11 @@ def admin_background(admin: dict = Depends(auth.current_admin)):
         rows = db.all_rows(
             con,
             """SELECT t.id, t.title, t.prompt, t.progress_msg, t.enrich_paused, u.name AS owner,
+                      (SELECT COUNT(*) FROM cards c WHERE c.topic_id=t.id) AS total,
+                      (SELECT COUNT(*) FROM cards c WHERE c.topic_id=t.id
+                        AND c.long_explanation != '') AS enrich_done,
+                      (SELECT COUNT(*) FROM cards c WHERE c.topic_id=t.id
+                        AND c.translations_json NOT IN ('', '{}')) AS translate_done,
                       (SELECT COUNT(*) FROM cards c WHERE c.topic_id=t.id AND c.sources_json='')
                         AS pending_enrich,
                       (SELECT COUNT(*) FROM cards c WHERE c.topic_id=t.id
@@ -665,6 +782,8 @@ def admin_background(admin: dict = Depends(auth.current_admin)):
     items = [
         {
             "id": r["id"], "title": r["title"] or r["prompt"][:60], "owner": r["owner"],
+            "total": r["total"], "enrich_done": r["enrich_done"],
+            "translate_done": r["translate_done"],
             "pending_enrich": r["pending_enrich"], "pending_translate": r["pending_translate"],
             "enrich_paused": bool(r["enrich_paused"]), "activity": r["progress_msg"],
         }
@@ -751,7 +870,8 @@ def admin_create_invite(body: InviteCreateBody, admin: dict = Depends(auth.curre
     if emailer.smtp_configured():
         try:
             subject, text = emailer.invitation_email(admin["language"], admin["name"], link)
-            emailer.send_invitation_sync(str(body.email), subject, text)
+            cta = "Konto erstellen" if admin["language"] == "de" else "Create account"
+            emailer.send_invitation_sync(str(body.email), subject, text, cta, link)
             emailed = True
         except Exception:
             log.exception("Failed to send invitation email to %s", body.email)
@@ -844,7 +964,7 @@ class StartSessionBody(BaseModel):
 def start_session(body: StartSessionBody, user: dict = Depends(auth.current_user)):
     size = max(3, min(30, body.size))
     with db.connect() as con:
-        topic = _own_topic(con, body.topic_id, user)
+        topic, _ = _accessible_topic(con, body.topic_id, user)
         if topic["status"] != "ready":
             raise HTTPException(409, "topic_not_ready")
         # Due reviews and unseen cards first (unseen in plan order), then earliest-due refreshers.

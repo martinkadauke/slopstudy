@@ -77,10 +77,11 @@ def _is_cancelled(topic_id: int) -> bool:
     return bool(row and row["cancel_requested"])
 
 
-def _ollama_actor(con, user):
-    """Overlay the admin-managed global Ollama connection onto a user dict, so the
-    LLM client always uses the shared endpoint regardless of who owns the topic."""
-    return {**user, **db.ollama_config(con)} if user else user
+def _ollama_actor(con, user, task: str | None = None):
+    """Overlay the admin-managed global Ollama connection (with the task-specific
+    model, if configured) onto a user dict, so the LLM client always uses the
+    shared endpoint regardless of who owns the topic."""
+    return {**user, **db.ollama_config(con, task)} if user else user
 
 
 def _insert_card(con, topic_id: int, unit_index: int, lang: str, card: dict):
@@ -105,7 +106,7 @@ def _update(topic_id: int, **fields):
 async def _process(topic: dict):
     topic_id = topic["id"]
     with db.connect() as con:
-        user = _ollama_actor(con, db.one(con, "SELECT * FROM users WHERE id=?", (topic["user_id"],)))
+        user = _ollama_actor(con, db.one(con, "SELECT * FROM users WHERE id=?", (topic["user_id"],)), task="generate")
         sources = db.all_rows(con, "SELECT * FROM sources WHERE topic_id=?", (topic_id,))
     if not user:
         _update(topic_id, status="failed", error="user deleted")
@@ -183,7 +184,7 @@ async def _process_revision() -> bool:
         if not rev:
             return False
         topic = db.one(con, "SELECT * FROM topics WHERE id=?", (rev["topic_id"],))
-        user = _ollama_actor(con, db.one(con, "SELECT * FROM users WHERE id=?", (rev["user_id"],)))
+        user = _ollama_actor(con, db.one(con, "SELECT * FROM users WHERE id=?", (rev["user_id"],)), task="generate")
         con.execute("UPDATE topic_revisions SET status='processing' WHERE id=?", (rev["id"],))
     if not topic or not user or not topic["plan_json"]:
         with db.connect() as con:
@@ -313,7 +314,11 @@ async def _enrich_step() -> bool:
         )
         if not topic:
             return False
-        user = _ollama_actor(con, db.one(con, "SELECT * FROM users WHERE id=?", (topic["user_id"],)))
+        base_user = db.one(con, "SELECT * FROM users WHERE id=?", (topic["user_id"],))
+        # Phases 1+2 (material, explanations) and phase 3 (translation) may run
+        # on different models — e.g. a small fast model for translation.
+        user = _ollama_actor(con, base_user, task="enrich")
+        translate_user = _ollama_actor(con, base_user, task="translate")
 
     plan = json.loads(topic["plan_json"])
     material = json.loads(topic["material_json"]) if topic["material_json"] else None
@@ -412,7 +417,8 @@ async def _enrich_step() -> bool:
         base_lang = card["lang"] or topic["language"]
         target = llm.other_lang(base_lang)
         try:
-            translated = await _await_or_pause(llm.translate_card(user, card, target), topic["id"])
+            translated = await _await_or_pause(
+                llm.translate_card(translate_user, card, target), topic["id"])
             with db.connect() as con:
                 con.execute(
                     "UPDATE cards SET translations_json=? WHERE id=?",
@@ -466,7 +472,7 @@ async def _maybe_refresh_topics() -> bool:
         )
         if not topic:
             return False
-        user = _ollama_actor(con, db.one(con, "SELECT * FROM users WHERE id=?", (topic["user_id"],)))
+        user = _ollama_actor(con, db.one(con, "SELECT * FROM users WHERE id=?", (topic["user_id"],)), task="generate")
     key = f"refresh:{topic['id']}"
     plan = json.loads(topic["plan_json"])
     try:
@@ -589,7 +595,7 @@ async def _send_report_for(user: dict):
 
     try:
         with db.connect() as con:
-            actor = _ollama_actor(con, user)
+            actor = _ollama_actor(con, user, task="report")
         body = await llm.generate_weakness_report(actor, cards_block)
     except Exception as e:
         log.warning("LLM report for user %s failed (%s), using template fallback", user["id"], e)
