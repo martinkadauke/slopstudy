@@ -1,12 +1,15 @@
 """SlopStudy — self-hosted AI flashcard study app (single container)."""
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import random
 import re
 import secrets
+import time
 import unicodedata
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -58,12 +61,35 @@ def auth_config():
         has_users = db.one(con, "SELECT 1 AS x FROM users LIMIT 1") is not None
         require_invite = db.get_setting(con, "require_invite", "0") == "1"
     # The very first account (the bootstrap admin) never needs an invite.
-    return {"require_invite": require_invite and has_users}
+    return {"require_invite": require_invite and has_users,
+            "smtp_enabled": emailer.smtp_configured()}
 
 
 class LoginBody(BaseModel):
     email: EmailStr
     password: str
+
+
+# Simple in-memory rate limiting for the auth surface (brute-force protection).
+_RATE_BUCKETS: dict[str, deque] = defaultdict(deque)
+
+
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for")  # set by the reverse proxy (NPM)
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _rate_limit(request: Request, scope: str, limit: int, window_s: int):
+    key = f"{scope}:{_client_ip(request)}"
+    bucket = _RATE_BUCKETS[key]
+    now = time.time()
+    while bucket and bucket[0] < now - window_s:
+        bucket.popleft()
+    if len(bucket) >= limit:
+        raise HTTPException(429, "rate_limited")
+    bucket.append(now)
 
 
 def _set_session_cookie(response: Response, token: str):
@@ -74,7 +100,8 @@ def _set_session_cookie(response: Response, token: str):
 
 
 @app.post("/api/register")
-def register(body: RegisterBody, response: Response):
+def register(body: RegisterBody, request: Request, response: Response):
+    _rate_limit(request, "register", 10, 3600)
     language = body.language if body.language in ("en", "de") else "en"
     email = str(body.email)
     with db.connect() as con:
@@ -110,7 +137,8 @@ def register(body: RegisterBody, response: Response):
 
 
 @app.post("/api/login")
-def login(body: LoginBody, response: Response):
+def login(body: LoginBody, request: Request, response: Response):
+    _rate_limit(request, "login", 10, 300)
     with db.connect() as con:
         user = db.one(con, "SELECT * FROM users WHERE email=?", (body.email,))
     if not user or not auth.verify_password(body.password, user["password_hash"]):
@@ -126,6 +154,70 @@ def logout(request: Request, response: Response):
     if token:
         auth.revoke_token(token)
     response.delete_cookie("fd_session")
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- password reset
+
+def _sha256(s: str) -> str:
+    return hashlib.sha256(s.encode()).hexdigest()
+
+
+class ForgotBody(BaseModel):
+    email: EmailStr
+
+
+@app.post("/api/forgot")
+def forgot_password(body: ForgotBody, request: Request):
+    """Always answers ok (no account enumeration); emails a 1h reset link if possible."""
+    _rate_limit(request, "forgot", 5, 900)
+    with db.connect() as con:
+        user = db.one(con, "SELECT * FROM users WHERE email=?", (str(body.email),))
+        if user:
+            token = secrets.token_urlsafe(32)
+            con.execute("DELETE FROM password_resets WHERE expires_at < ?", (db.now(),))
+            con.execute(
+                "INSERT INTO password_resets (token_hash, user_id, expires_at) VALUES (?,?,?)",
+                (_sha256(token), user["id"], db.now() + 3600),
+            )
+    if user and emailer.smtp_configured():
+        base = os.environ.get("APP_BASE_URL", "http://localhost:8000").rstrip("/")
+        try:
+            subject, text = emailer.password_reset_email(
+                user["language"], user["name"], f"{base}/#/reset/{token}")
+            emailer.send_invitation_sync(user["email"], subject, text)
+        except Exception:
+            log.exception("Failed to send reset mail to %s", user["email"])
+    return {"ok": True}
+
+
+@app.get("/api/reset/{token}")
+def check_reset(token: str):
+    with db.connect() as con:
+        row = db.one(con, "SELECT user_id FROM password_resets WHERE token_hash=? AND expires_at > ?",
+                     (_sha256(token), db.now()))
+    if not row:
+        raise HTTPException(404, "reset_invalid")
+    return {"ok": True}
+
+
+class ResetBody(BaseModel):
+    token: str
+    password: str = Field(min_length=8, max_length=200)
+
+
+@app.post("/api/reset")
+def reset_password(body: ResetBody):
+    with db.connect() as con:
+        row = db.one(con, "SELECT user_id FROM password_resets WHERE token_hash=? AND expires_at > ?",
+                     (_sha256(body.token), db.now()))
+        if not row:
+            raise HTTPException(404, "reset_invalid")
+        con.execute("UPDATE users SET password_hash=? WHERE id=?",
+                    (auth.hash_password(body.password), row["user_id"]))
+        con.execute("DELETE FROM password_resets WHERE user_id=?", (row["user_id"],))
+        # Invalidate every existing session: whoever holds the inbox now owns the account.
+        con.execute("DELETE FROM auth_tokens WHERE user_id=?", (row["user_id"],))
     return {"ok": True}
 
 
@@ -412,6 +504,32 @@ def revise_topic(topic_id: int, body: ReviseBody, user: dict = Depends(auth.curr
                VALUES (?,?,?,?)""",
             (topic_id, user["id"], body.instruction.strip(), db.now()),
         )
+    return {"ok": True}
+
+
+@app.get("/api/topics/{topic_id}/cards")
+def list_topic_cards(topic_id: int, user: dict = Depends(auth.current_user)):
+    """Card inventory for the deck owner/admin (browse + prune bad cards)."""
+    with db.connect() as con:
+        _own_topic(con, topic_id, user)
+        return db.all_rows(
+            con,
+            """SELECT id, unit_index, type, question, difficulty,
+                      (long_explanation != '') AS enriched,
+                      (translations_json NOT IN ('', '{}')) AS translated
+               FROM cards WHERE topic_id=? ORDER BY unit_index, id""",
+            (topic_id,),
+        )
+
+
+@app.delete("/api/cards/{card_id}")
+def delete_card(card_id: int, user: dict = Depends(auth.current_user)):
+    with db.connect() as con:
+        card = db.one(con, "SELECT topic_id FROM cards WHERE id=?", (card_id,))
+        if not card:
+            raise HTTPException(404, "card_not_found")
+        _own_topic(con, card["topic_id"], user)  # owner or admin
+        con.execute("DELETE FROM cards WHERE id=?", (card_id,))
     return {"ok": True}
 
 
@@ -851,6 +969,8 @@ def answer_card(session_id: int, body: AnswerBody, user: dict = Depends(auth.cur
         if str(body.card_id) in answered:
             raise HTTPException(409, "already_answered")
         card = db.one(con, "SELECT * FROM cards WHERE id=?", (body.card_id,))
+        if not card:
+            raise HTTPException(404, "card_not_found")
         topic_lang = db.one(con, "SELECT language FROM topics WHERE id=?",
                             (card["topic_id"],))["language"]
         # Check against the same language the learner was shown.
@@ -891,6 +1011,8 @@ def skip_card(session_id: int, body: SkipBody, user: dict = Depends(auth.current
         if str(body.card_id) in answered:
             raise HTTPException(409, "already_answered")
         card = db.one(con, "SELECT * FROM cards WHERE id=?", (body.card_id,))
+        if not card:
+            raise HTTPException(404, "card_not_found")
         cost = game.skip_cost(card["difficulty"])
         balance = db.one(con, "SELECT points FROM users WHERE id=?", (user["id"],))["points"]
         if balance < cost:
@@ -925,6 +1047,8 @@ def fifty_joker(session_id: int, body: FiftyBody, user: dict = Depends(auth.curr
         if str(body.card_id) in jokers:
             raise HTTPException(409, "joker_used")
         card = db.one(con, "SELECT * FROM cards WHERE id=?", (body.card_id,))
+        if not card:
+            raise HTTPException(404, "card_not_found")
         topic_lang = db.one(con, "SELECT language FROM topics WHERE id=?",
                             (card["topic_id"],))["language"]
         # Operate on the choices in the language the learner is actually seeing.
@@ -1026,4 +1150,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/{path:path}")
 def spa(path: str):
+    if path.startswith("api/"):
+        # Unknown API routes get a JSON 404, not the SPA shell.
+        raise HTTPException(404, "not_found")
     return FileResponse(os.path.join(STATIC_DIR, "index.html"))

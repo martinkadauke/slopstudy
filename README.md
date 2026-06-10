@@ -32,7 +32,7 @@ of flashcards from it. You get an email when the deck is ready.
   your Ollama host is asleep at night
 - 🌙 **Nightly fresh questions** (per-topic toggle): each night the AI generates a new batch of
   questions for the unit you currently get wrong most often, explicitly avoiding duplicates of
-  existing cards
+  existing cards (deck growth is capped at 3× the originally requested size)
 - 🔁 Spaced-repetition-lite scheduling (due cards come back at growing intervals); decks can be
   re-run indefinitely and every answer is logged
 - 🌍 **Fully bilingual (EN/DE)** — not just the UI: every card is generated in the creator's
@@ -44,6 +44,11 @@ of flashcards from it. You get an email when the deck is ready.
 - ✏️ **Edit decks in plain language** — the creator (or an admin) can type instructions like
   "add 8 harder questions about X" or "remove the questions about Y"; the AI applies them in the
   background
+- 🗂️ **Card management** — browse, filter and delete individual cards of a deck
+  (owner or admin)
+- 🔑 **Password reset by email**, invite-by-email onboarding, and rate-limited
+  auth endpoints (brute-force protection) for safe public hosting
+- ⌨️ Keyboard shortcuts while studying (1–4 pick an option, Enter advances)
 - 🌍 dark/light mode, editable profile
 - 📱 Responsive — works on phones and desktops
 

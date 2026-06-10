@@ -53,7 +53,8 @@ function apiError(e) {
   const code = e?.detail || e?.message || String(e);
   const known = { invalid_credentials: 1, email_taken: 1, wrong_password: 1,
     not_enough_points: 1, topic_not_ready: 1, joker_used: 1,
-    invite_required: 1, invite_invalid: 1 };
+    invite_required: 1, invite_invalid: 1, rate_limited: 1, reset_invalid: 1 };
+  if (code === 429) { toast(t("err_rate_limited"), "error"); return; }
   toast(known[code] ? t("err_" + code) : t("err_generic", code), "error");
 }
 
@@ -163,6 +164,7 @@ async function renderAuth() {
       </form>
       <p style="text-align:center;margin-bottom:0">
         <a href="#" id="auth-toggle">${isLogin ? t("no_account") : t("have_account")}</a>
+        ${isLogin ? `<br><a href="#/forgot" class="small dim">${t("forgot_link")}</a>` : ""}
       </p>
     </div>
   </div>`;
@@ -236,6 +238,73 @@ async function renderInvite(code) {
       localStorage.setItem("fd_lang", fd.get("language"));
       await loadUser();
       go("dashboard");
+    } catch (err) { apiError(err); }
+  };
+}
+
+/* ---------------- password reset ---------------- */
+
+async function renderForgot() {
+  if (state.authConfig === undefined) {
+    state.authConfig = await api("/auth-config").catch(() => ({ smtp_enabled: false }));
+  }
+  const smtpOn = state.authConfig.smtp_enabled;
+  $("#app").innerHTML = `
+  <div class="auth-wrap">
+    <div class="auth-hero"><div class="logo">🎴 SlopStudy</div></div>
+    <div class="card">
+      <h2>${t("forgot_title")}</h2>
+      ${smtpOn ? `
+      <p class="small dim">${t("forgot_hint")}</p>
+      <form id="forgot-form">
+        <label class="field"><span>${t("email")}</span>
+          <input type="email" name="email" required autocomplete="email"></label>
+        <button class="btn primary block" type="submit">${t("forgot_send")}</button>
+      </form>` : `<p class="small dim">${t("forgot_smtp_off")}</p>`}
+      <p style="text-align:center;margin-bottom:0"><a href="#/auth">${t("back_to_login")}</a></p>
+    </div>
+  </div>`;
+  const form = $("#forgot-form");
+  if (form) form.onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api("/forgot", { json: { email: e.target.email.value.trim() } });
+      toast(t("forgot_sent"), "success");
+      go("auth");
+    } catch (err) { apiError(err); }
+  };
+}
+
+async function renderReset(token) {
+  try {
+    await api("/reset/" + encodeURIComponent(token || ""));
+  } catch {
+    toast(t("err_reset_invalid"), "error");
+    go("auth");
+    renderAuth();
+    return;
+  }
+  $("#app").innerHTML = `
+  <div class="auth-wrap">
+    <div class="auth-hero"><div class="logo">🎴 SlopStudy</div></div>
+    <div class="card">
+      <h2>${t("reset_title")}</h2>
+      <form id="reset-form">
+        <label class="field"><span>${t("password_new")}</span>
+          <input type="password" name="password" required minlength="8" autocomplete="new-password" autofocus>
+          <small class="dim">${t("password_hint")}</small></label>
+        <button class="btn primary block" type="submit">${t("reset_submit")}</button>
+      </form>
+    </div>
+  </div>`;
+  $("#reset-form").onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api("/reset", { json: { token, password: e.target.password.value } });
+      toast(t("reset_done"), "success");
+      state.authMode = "login";
+      go("auth");
+      renderAuth();
     } catch (err) { apiError(err); }
   };
 }
@@ -427,7 +496,10 @@ function renderFileChips() {
 async function renderTopic(id) {
   const topic = await api("/topics/" + id);
   if (topic.status === "ready" || topic.status === "stopped") {
-    topic.revisions = await api(`/topics/${id}/revisions`).catch(() => []);
+    [topic.revisions, topic.cards] = await Promise.all([
+      api(`/topics/${id}/revisions`).catch(() => []),
+      api(`/topics/${id}/cards`).catch(() => []),
+    ]);
   }
   state.topic = topic;
   let planHtml = "";
@@ -544,17 +616,50 @@ async function renderTopic(id) {
     </div>`;
   }
 
+  let cardsHtml = "";
+  if ((topic.cards || []).length) {
+    const rows = topic.cards.map((c) => `
+      <div class="row spread cardrow" data-q="${esc(c.question.toLowerCase())}"
+           style="border-top:1px solid var(--border);padding:8px 0;gap:8px">
+        <span class="small" style="flex:1">
+          <span class="badge diff">U${c.unit_index + 1} · ${"●".repeat(c.difficulty)}</span>
+          ${esc(c.question)}
+        </span>
+        <button class="btn sm danger" onclick="FD.deleteCard(${c.id}, ${topic.id})">✕</button>
+      </div>`).join("");
+    cardsHtml = `<div class="card">
+      <div class="unit" style="margin-bottom:0">
+        <button type="button" onclick="this.parentNode.querySelector('.unit-body').hidden ^= 1">
+          <span>🗂️ ${t("all_cards")} (${topic.cards.length})</span><span>▾</span></button>
+        <div class="unit-body" hidden>
+          <input type="text" placeholder="${esc(t("filter_cards"))}" style="margin-bottom:6px"
+            oninput="FD.filterCards(this.value)">
+          <div id="card-list">${rows}</div>
+        </div>
+      </div>
+    </div>`;
+  }
+
   const sources = topic.sources.length
     ? `<div class="card"><h2>🔗 ${t("sources")}</h2>
         ${topic.sources.map((s) => `<span class="filechip">${s.kind === "url" ? "🌐" : "📄"} ${esc(s.name)}</span>`).join("")}</div>`
     : "";
+
+  // The page re-renders while background work is running — remember which
+  // accordions the user opened so a refresh doesn't collapse what they're reading.
+  const openStates = [...document.querySelectorAll("main .unit-body")].map((b) => !b.hidden);
 
   $("#app").innerHTML = shell(`
     <div class="row spread">
       <h1>${esc(topic.title)} <span class="badge mode">${t("mode_" + topic.mode)}</span></h1>
       ${topic.status === "ready" ? `<button class="btn sm danger right" onclick="FD.deleteTopic(${topic.id})">${t("delete")}</button>` : ""}
     </div>
-    ${enriching}${actionHtml}${reviseHtml}${materialHtml}${planHtml}${sources}`);
+    ${enriching}${actionHtml}${reviseHtml}${materialHtml}${cardsHtml}${planHtml}${sources}`);
+
+  const bodies = document.querySelectorAll("main .unit-body");
+  if (bodies.length === openStates.length) {
+    openStates.forEach((open, i) => { if (open) bodies[i].hidden = false; });
+  }
 
   const revForm = $("#revise-form");
   if (revForm) {
@@ -697,7 +802,9 @@ function renderStudy() {
             ✂️ ${canFifty ? t("fifty_for", card.fifty_cost) : t("fifty_locked", card.fifty_cost)}</button>` : ""}
           <button class="btn ghost sm right" ${canSkip ? "" : "disabled"} onclick="FD.skip()">
             🃏 ${canSkip ? t("skip_for", card.skip_cost) : t("skip_locked", card.skip_cost)}</button>
-        </div>`;
+        </div>
+        ${card.type === "multiple_choice" && st.optionsShown
+          ? `<p class="small dim" style="margin:10px 0 0;text-align:center">${t("kbd_hint")}</p>` : ""}`;
       })()}
     </div>
   </div>`);
@@ -1088,6 +1195,20 @@ window.FD = {
     const size = parseInt($("#sess-size")?.value || "10", 10);
     await startSessionFor(topicId, size);
   },
+  async deleteCard(cardId, topicId) {
+    if (!confirm(t("confirm_delete_card"))) return;
+    try {
+      await api(`/cards/${cardId}`, { method: "DELETE" });
+      toast(t("card_deleted"), "success");
+      renderTopic(topicId).catch(() => {});
+    } catch (err) { apiError(err); }
+  },
+  filterCards(value) {
+    const needle = value.trim().toLowerCase();
+    document.querySelectorAll("#card-list .cardrow").forEach((row) => {
+      row.style.display = !needle || row.dataset.q.includes(needle) ? "" : "none";
+    });
+  },
   async toggleRefresh(id, on) {
     try {
       await api(`/topics/${id}`, { method: "PUT", json: { nightly_refresh: on } });
@@ -1218,8 +1339,10 @@ async function route() {
   clearTimeout(state.pollTimer);
   applyTheme();
   const parts = (location.hash.slice(2) || "dashboard").split("/");
-  // The invitation landing page is public (the recipient has no account yet).
+  // Public pages (the visitor may have no account / be logged out).
   if (parts[0] === "invite") { await renderInvite(parts[1]); return; }
+  if (parts[0] === "forgot") { await renderForgot(); return; }
+  if (parts[0] === "reset") { await renderReset(parts[1]); return; }
   if (!state.user) {
     try { await loadUser(); } catch { renderAuth(); return; }
   }
@@ -1243,6 +1366,39 @@ async function route() {
     }
   }
 }
+
+// Study-session keyboard shortcuts: 1-9 picks a choice, Enter advances,
+// y/j = yes, n = no. Ignored while typing in an input (e.g. exact answers).
+window.addEventListener("keydown", (e) => {
+  const st = state.study;
+  const onStudy = (location.hash.slice(2) || "").split("/")[0] === "study";
+  if (!st || st.summary || !onStudy) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const el = e.target;
+  if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA")) return;
+  const card = st.cards[st.idx];
+  if (st.feedback) {
+    if (e.key === "Enter" || e.key === "ArrowRight") { e.preventDefault(); FD.next(); }
+    return;
+  }
+  if (card.type === "multiple_choice") {
+    if (!st.optionsShown) {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); FD.showOptions(); }
+      return;
+    }
+    const n = parseInt(e.key, 10);
+    if (n >= 1 && n <= card.choices.length) {
+      const choice = card.choices[n - 1];
+      const removed = (st.fifty && st.fifty[card.id]) || [];
+      if (!removed.includes(choice)) { e.preventDefault(); FD.answer(choice); }
+    }
+  } else if (card.type === "yes_no") {
+    if (e.key === "y" || e.key === "j" || e.key === "1") { e.preventDefault(); FD.answer("yes"); }
+    if (e.key === "n" || e.key === "2") { e.preventDefault(); FD.answer("no"); }
+  } else if (card.type === "open" && !st.revealed) {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); FD.reveal(); }
+  }
+});
 
 window.addEventListener("hashchange", route);
 route();

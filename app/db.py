@@ -122,6 +122,12 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS password_resets (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS invites (
     code TEXT PRIMARY KEY,
     email TEXT NOT NULL DEFAULT '',

@@ -94,6 +94,31 @@ def invitation_email(lang: str, inviter_name: str, link: str) -> tuple[str, str]
     return s["subject"], s["body"].format(inviter=inviter_name, link=link)
 
 
+RESET_STRINGS = {
+    "en": {
+        "subject": "Reset your SlopStudy password",
+        "body": (
+            "Hi {name},\n\nsomeone (hopefully you) requested a password reset for your "
+            "SlopStudy account.\n\nSet a new password here (link valid for 1 hour):\n{link}\n\n"
+            "If you didn't request this, you can ignore this email.\nSlopStudy"
+        ),
+    },
+    "de": {
+        "subject": "Setze dein SlopStudy-Passwort zurück",
+        "body": (
+            "Hallo {name},\n\njemand (hoffentlich du) hat das Zurücksetzen des Passworts für "
+            "dein SlopStudy-Konto angefordert.\n\nSetze hier ein neues Passwort (Link 1 Stunde "
+            "gültig):\n{link}\n\nFalls du das nicht warst, ignoriere diese E-Mail einfach.\nSlopStudy"
+        ),
+    },
+}
+
+
+def password_reset_email(lang: str, name: str, link: str) -> tuple[str, str]:
+    s = RESET_STRINGS.get(lang, RESET_STRINGS["en"])
+    return s["subject"], s["body"].format(name=name, link=link)
+
+
 def send_invitation_sync(to_addr: str, subject: str, body: str):
     """Synchronous send, used from the admin request handler (small, blocking)."""
     _send_sync(to_addr, subject, body)

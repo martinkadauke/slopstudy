@@ -309,7 +309,7 @@ async def _enrich_step() -> bool:
                  OR EXISTS (SELECT 1 FROM cards c WHERE c.topic_id=t.id AND c.sources_json='')
                  OR EXISTS (SELECT 1 FROM cards c WHERE c.topic_id=t.id
                             AND c.sources_json != '' AND c.translations_json='')
-               ) ORDER BY t.id LIMIT 1""",
+               ) ORDER BY COALESCE(t.ready_at, 0) DESC, t.id DESC LIMIT 1""",
         )
         if not topic:
             return False
@@ -439,6 +439,9 @@ async def _enrich_step() -> bool:
 # ------------------------------------------------------------- nightly refresh
 
 REFRESH_BATCH = 8
+# Nightly refresh stops growing a deck once it reaches this multiple of the
+# originally requested size — otherwise decks inflate by 8 cards forever.
+REFRESH_CAP_FACTOR = 3
 
 
 async def _maybe_refresh_topics() -> bool:
@@ -476,16 +479,25 @@ async def _maybe_refresh_topics() -> bool:
                    GROUP BY c.unit_index ORDER BY w DESC LIMIT 1""",
                 (topic["id"], db.now() - 14 * 86400),
             )
-            existing = [r["question"] for r in db.all_rows(
-                con, "SELECT question FROM cards WHERE topic_id=? ORDER BY id DESC LIMIT 60",
-                (topic["id"],))]
+            all_questions = [r["question"] for r in db.all_rows(
+                con, "SELECT question FROM cards WHERE topic_id=?", (topic["id"],))]
             srcs = db.all_rows(con, "SELECT * FROM sources WHERE topic_id=?", (topic["id"],))
+        if len(all_questions) >= topic["card_count"] * REFRESH_CAP_FACTOR:
+            log.info("Nightly refresh: topic %s at cap (%s cards), skipping",
+                     topic["id"], len(all_questions))
+            with db.connect() as con:
+                con.execute("UPDATE topics SET last_refresh_at=? WHERE id=?",
+                            (db.now(), topic["id"]))
+            return True
         unit_index = weak["unit_index"] if weak and weak["w"] else \
             int(now.timestamp() // 86400) % len(plan["units"])
         cards = await llm.generate_unit_cards(
             user, topic, plan, unit_index, REFRESH_BATCH,
-            extract.combine_sources(srcs), avoid_questions=existing,
+            extract.combine_sources(srcs), avoid_questions=all_questions[-60:],
         )
+        # Belt-and-braces dedup: the prompt asks for new angles, but models repeat.
+        seen = {q.strip().lower() for q in all_questions}
+        cards = [c for c in cards if c["question"].strip().lower() not in seen]
         with db.connect() as con:
             for card in cards:
                 _insert_card(con, topic["id"], unit_index, topic["language"], card)
