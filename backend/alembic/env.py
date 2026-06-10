@@ -1,16 +1,26 @@
 import asyncio
+import os
 from logging.config import fileConfig
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from alembic import context
 
+# Import all models so their tables are registered on Base.metadata
+import app.models  # noqa: F401
+from app.models.base import Base
+
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-target_metadata = None
+# Allow DATABASE_URL env var to override alembic.ini
+database_url = os.environ.get("DATABASE_URL")
+if database_url:
+    config.set_main_option("sqlalchemy.url", database_url)
+
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
