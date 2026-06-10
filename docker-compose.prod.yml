@@ -1,0 +1,35 @@
+services:
+  frontend:
+    build: .
+    ports:
+      - "80:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    # Replace with your published backend image, e.g.:
+    #   image: ghcr.io/your-org/slopstudy-api:latest
+    image: slopstudy-api:latest
+    environment:
+      # Required: generate with `openssl rand -hex 32`
+      # SECRET_KEY=change_me_before_deploying
+      - SECRET_KEY=${SECRET_KEY}
+      - DATABASE_URL=sqlite:////data/db.sqlite3
+      - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
+    volumes:
+      - data:/data
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  data:
+    name: slopstudy_data

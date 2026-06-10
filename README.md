@@ -1,39 +1,87 @@
-# slopstudy
+# SlopStudy
 
-A noob vibecoded studying flashcard app that lets you study any topic. Self-hostable and Ollama ready.
+A self-hostable, Ollama-powered flashcard app. Create study topics, upload sources (PDF, URL, text), generate flashcards with AI, and track your progress with streaks, points, and badges.
 
-## Quick start
+## Quick Start
 
 ```bash
-docker compose up --build
+git clone https://github.com/martinkadauke/slopstudy
+cd slopstudy
+docker compose -f docker-compose.prod.yml up -d
 ```
 
-Then open [http://localhost:8000](http://localhost:8000).
+Open http://localhost and register your first account. The first registered user receives admin access.
 
-## Environment variables
+## Configuration
+
+All settings can be configured via environment variables or the in-app Settings page.
 
 | Variable | Default | Description |
 |---|---|---|
-| `DATABASE_URL` | `sqlite+aiosqlite:////data/slopstudy.db` | SQLAlchemy async database URL |
-| `SECRET_KEY` | `changeme` | Secret key for JWT signing — **change in production** |
-| `CORS_ORIGINS` | `*` | Comma-separated list of allowed CORS origins |
+| `SECRET_KEY` | — | **Required.** `openssl rand -hex 32` |
+| `DATABASE_URL` | `sqlite:////data/db.sqlite3` | SQLite path or PostgreSQL URL |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama API endpoint |
+| `OLLAMA_MODEL` | `llama3.2` | Model used to generate cards |
+| `SMTP_HOST` | — | SMTP server hostname |
+| `SMTP_PORT` | `587` | SMTP server port |
+| `SMTP_USER` | — | SMTP username |
+| `SMTP_PASSWORD` | — | SMTP password |
+| `SMTP_FROM` | — | Sender address for outgoing mail |
+| `SMTP_TLS` | `true` | Enable STARTTLS |
 
-Copy `.env.example` to `.env` and adjust values before running in production.
+Create a `.env` file at the repo root (never commit it):
 
-## Development
-
-### Backend
-
-```bash
-cd backend
-pip install -r requirements.txt
-uvicorn app.main:app --reload
+```dotenv
+SECRET_KEY=your_generated_secret_here
 ```
 
-### Frontend
+## Ollama Setup
+
+Ollama runs locally and provides the AI that generates flashcards and grades exam answers. Install from [ollama.com](https://ollama.com), then pull a model:
 
 ```bash
-cd frontend
-npm install
-npm run dev
+ollama pull llama3.2   # recommended — fast, good quality
+ollama pull mistral    # alternative — slightly larger context
 ```
+
+Configure the endpoint in Settings → Ollama, or set `OLLAMA_URL` if Ollama runs on a different host. When running the whole stack in Docker, set `OLLAMA_URL=http://host.docker.internal:11434` to reach Ollama on your host machine.
+
+## SMTP Setup
+
+Email is optional (used for password resets). Configure via Settings → SMTP or environment variables.
+
+**Gmail (App Password)**
+```dotenv
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=you@gmail.com
+SMTP_PASSWORD=xxxx_xxxx_xxxx_xxxx
+SMTP_FROM=you@gmail.com
+```
+Generate an App Password at myaccount.google.com → Security → App passwords (requires 2FA).
+
+**Mailgun**
+```dotenv
+SMTP_HOST=smtp.mailgun.org
+SMTP_PORT=587
+SMTP_USER=postmaster@mg.yourdomain.com
+SMTP_PASSWORD=your_mailgun_smtp_password
+SMTP_FROM=noreply@yourdomain.com
+```
+
+**Self-hosted Postfix**
+```dotenv
+SMTP_HOST=mail.yourdomain.com
+SMTP_PORT=587
+SMTP_USER=noreply@yourdomain.com
+SMTP_PASSWORD=your_password
+SMTP_FROM=noreply@yourdomain.com
+```
+
+## First User
+
+Register at http://localhost/register. The first account created automatically receives admin privileges. Subsequent registrations create regular user accounts.
+
+## Screenshots
+
+<!-- Add screenshots here -->

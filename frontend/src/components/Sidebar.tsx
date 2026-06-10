@@ -62,7 +62,7 @@ export function Sidebar() {
             <p className="truncate text-sm font-medium">{user?.username}</p>
             <div className="mt-0.5">
               <Badge variant="secondary" className="text-xs">
-                {user?.points ?? 0} pts
+                {user?.points ?? 0} {t('common.pts')}
               </Badge>
             </div>
           </div>

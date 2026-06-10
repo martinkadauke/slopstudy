@@ -37,7 +37,7 @@
       "cards": "{{count}} Karten",
       "status": {
         "draft": "Entwurf",
-        "generating": "Wird generiert",
+        "generating": "Generierung läuft…",
         "ready": "Bereit",
         "failed": "Fehlgeschlagen"
       }
@@ -85,7 +85,7 @@
     },
     "status": {
       "draft": "Entwurf",
-      "generating": "Wird generiert...",
+      "generating": "Generierung läuft…",
       "ready": "Bereit",
       "failed": "Fehlgeschlagen"
     }
@@ -94,8 +94,8 @@
     "title": "Lernmodus",
     "modeLabel": "Modus",
     "modes": {
-      "multiple_choice": "Multiple Choice",
-      "exact_answer": "Genaue Antwort",
+      "multiple_choice": "Mehrfachauswahl",
+      "exact_answer": "Exakte Antwort",
       "yes_no": "Ja / Nein",
       "exam_question": "Prüfungsfragen",
       "mixed": "Gemischt"
@@ -150,6 +150,9 @@
   },
   "profile": {
     "title": "Profil",
+    "account": "Konto",
+    "password": "Passwort",
+    "preferences": "Voreinstellungen",
     "username": "Benutzername",
     "email": "E-Mail",
     "currentPassword": "Aktuelles Passwort",
@@ -220,7 +223,8 @@
     "add": "Hinzufügen",
     "confirm": "Bestätigen",
     "days": "Tage",
-    "percent": "%"
+    "percent": "%",
+    "pts": "Pkt."
   },
   "language": {
     "en": "EN",
