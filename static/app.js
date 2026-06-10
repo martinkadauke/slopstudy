@@ -52,7 +52,8 @@ function toast(msg, kind = "") {
 function apiError(e) {
   const code = e?.detail || e?.message || String(e);
   const known = { invalid_credentials: 1, email_taken: 1, wrong_password: 1,
-    not_enough_points: 1, topic_not_ready: 1, joker_used: 1 };
+    not_enough_points: 1, topic_not_ready: 1, joker_used: 1,
+    invite_required: 1, invite_invalid: 1 };
   toast(known[code] ? t("err_" + code) : t("err_generic", code), "error");
 }
 
@@ -126,8 +127,12 @@ function setPointsPill(points) {
 
 /* ---------------- auth view ---------------- */
 
-function renderAuth() {
+async function renderAuth() {
   const isLogin = state.authMode === "login";
+  if (state.authConfig === undefined) {
+    state.authConfig = await api("/auth-config").catch(() => ({ require_invite: false }));
+  }
+  const needInvite = !isLogin && state.authConfig.require_invite;
   $("#app").innerHTML = `
   <div class="auth-wrap">
     <div class="auth-hero">
@@ -151,6 +156,9 @@ function renderAuth() {
           <input type="password" name="password" required minlength="8"
             autocomplete="${isLogin ? "current-password" : "new-password"}">
           ${isLogin ? "" : `<small class="dim">${t("password_hint")}</small>`}</label>
+        ${needInvite ? `<label class="field"><span>${t("invite_code")}</span>
+          <input type="text" name="invite" required maxlength="64" autocomplete="off">
+          <small class="dim">${t("invite_hint")}</small></label>` : ""}
         <button class="btn primary block" type="submit">${isLogin ? t("login") : t("register")}</button>
       </form>
       <p style="text-align:center;margin-bottom:0">
@@ -171,6 +179,61 @@ function renderAuth() {
     try {
       await api(isLogin ? "/login" : "/register", { json: body });
       if (body.language) localStorage.setItem("fd_lang", body.language);
+      await loadUser();
+      go("dashboard");
+    } catch (err) { apiError(err); }
+  };
+}
+
+/* ---------------- invite landing ---------------- */
+
+async function renderInvite(code) {
+  let info;
+  try {
+    info = await api("/invite/" + encodeURIComponent(code || ""));
+  } catch {
+    // Invalid / used / revoked invite — fall back to the normal login screen.
+    state.authMode = "login";
+    go("auth");
+    renderAuth();
+    toast(t("err_invite_invalid"), "error");
+    return;
+  }
+  $("#app").innerHTML = `
+  <div class="auth-wrap">
+    <div class="auth-hero">
+      <div class="logo">🎴 SlopStudy</div>
+      <p class="dim">${t("invite_welcome")}</p>
+    </div>
+    <div class="card">
+      <h2>${t("invite_create_account")}</h2>
+      <form id="invite-reg">
+        <label class="field"><span>${t("email")}</span>
+          <input type="email" value="${esc(info.email)}" readonly
+            style="opacity:.7;cursor:not-allowed"></label>
+        <label class="field"><span>${t("name")}</span>
+          <input type="text" name="name" required maxlength="80" autofocus></label>
+        <label class="field"><span>${t("language")}</span>
+          <select name="language">
+            <option value="en" ${lang() === "en" ? "selected" : ""}>English</option>
+            <option value="de" ${lang() === "de" ? "selected" : ""}>Deutsch</option>
+          </select></label>
+        <label class="field"><span>${t("password")}</span>
+          <input type="password" name="password" required minlength="8" autocomplete="new-password">
+          <small class="dim">${t("password_hint")}</small></label>
+        <button class="btn primary block" type="submit">${t("invite_create_account")}</button>
+      </form>
+    </div>
+  </div>`;
+  $("#invite-reg").onsubmit = async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try {
+      await api("/register", { json: {
+        email: info.email, name: fd.get("name"), password: fd.get("password"),
+        language: fd.get("language"), invite: code,
+      }});
+      localStorage.setItem("fd_lang", fd.get("language"));
       await loadUser();
       go("dashboard");
     } catch (err) { apiError(err); }
@@ -799,8 +862,9 @@ async function renderLeaderboard() {
 /* ---------------- admin ---------------- */
 
 async function renderAdmin() {
-  const [topics, users, bg, ollama] = await Promise.all([
-    api("/admin/topics"), api("/admin/users"), api("/admin/background"), api("/admin/ollama"),
+  const [topics, users, bg, ollama, invites] = await Promise.all([
+    api("/admin/topics"), api("/admin/users"), api("/admin/background"),
+    api("/admin/ollama"), api("/admin/invites"),
   ]);
   state.adminTopics = topics;
 
@@ -866,6 +930,34 @@ async function renderAdmin() {
     </div>`;
   }).join("");
 
+  const inviteRows = invites.items.map((iv) => {
+    const used = !!iv.used_at;
+    return `<div class="row spread" style="border-top:1px solid var(--border);padding:9px 0">
+      <div>
+        <b>${esc(iv.email || iv.code)}</b>
+        ${used ? `<span class="badge ready">${t("inv_used_by", iv.used_by_name || "?")}</span>`
+               : `<span class="badge queued">${t("inv_unused")}</span>`}
+      </div>
+      <div class="row">
+        ${used ? "" : `<button class="btn sm ghost" onclick="FD.copyInvite('${esc(iv.link)}')">${t("inv_copy_link")}</button>
+          <button class="btn sm danger" onclick="FD.revokeInvite('${esc(iv.code)}')">${t("inv_revoke")}</button>`}
+      </div>
+    </div>`;
+  }).join("");
+  const invitesHtml = `<div class="card">
+    <div class="row spread">
+      <h2 style="margin:0">🎟️ ${t("admin_invites")}</h2>
+      <label class="switch"><input type="checkbox" ${invites.require_invite ? "checked" : ""}
+        onchange="FD.toggleRequireInvite(this.checked)"><span class="track"></span> ${t("inv_require")}</label>
+    </div>
+    <p class="small dim">${t("admin_invites_desc")}${invites.smtp_enabled ? "" : " " + t("inv_no_smtp")}</p>
+    <form id="invite-form" class="row" style="gap:8px">
+      <input type="email" name="email" required placeholder="${t("inv_email_ph")}" style="flex:1;min-width:200px">
+      <button class="btn primary" type="submit">✉️ ${t("inv_send")}</button>
+    </form>
+    ${inviteRows || `<p class="small dim" style="margin-bottom:0">${t("inv_none")}</p>`}
+  </div>`;
+
   $("#app").innerHTML = shell(`
   <h1>🛡️ ${t("admin_title")}</h1>
   <form class="card" id="ollama-form">
@@ -906,6 +998,7 @@ async function renderAdmin() {
       ${usersHtml}
     </table></div>
   </div>
+  ${invitesHtml}
   <div class="card">
     <h2>📚 ${t("admin_all_topics")}</h2>
     <div class="scroll-x"><table class="lb">
@@ -913,6 +1006,18 @@ async function renderAdmin() {
       ${topicsHtml}
     </table></div>
   </div>`);
+
+  const invForm = $("#invite-form");
+  if (invForm) invForm.onsubmit = async (e) => {
+    e.preventDefault();
+    const email = e.target.email.value.trim();
+    try {
+      const res = await api("/admin/invites", { json: { email } });
+      await navigator.clipboard?.writeText(res.link).catch(() => {});
+      toast(res.emailed ? t("inv_sent", email) : t("inv_link_copied"), "success");
+      renderAdmin();
+    } catch (err) { apiError(err); }
+  };
 
   $("#ollama-form").onsubmit = async (e) => {
     e.preventDefault();
@@ -1011,6 +1116,19 @@ window.FD = {
     try { await api("/admin/background", { json: { paused: on } }); renderAdmin(); }
     catch (err) { apiError(err); }
   },
+  async toggleRequireInvite(on) {
+    try { await api("/admin/invites/require", { method: "PUT", json: { require_invite: on } });
+      state.authConfig = undefined; renderAdmin(); }
+    catch (err) { apiError(err); }
+  },
+  async copyInvite(link) {
+    try { await navigator.clipboard.writeText(link); toast(t("inv_link_copied"), "success"); }
+    catch { toast(link); }
+  },
+  async revokeInvite(code) {
+    try { await api(`/admin/invites/${encodeURIComponent(code)}`, { method: "DELETE" }); renderAdmin(); }
+    catch (err) { apiError(err); }
+  },
   async enrichToggle(id, action) {
     try { await api(`/admin/topics/${id}/enrich/${action}`, { method: "POST" }); renderAdmin(); }
     catch (err) { apiError(err); }
@@ -1096,11 +1214,14 @@ async function route() {
   clearTimeout(state.pollTimer);
   applyTheme();
   const parts = (location.hash.slice(2) || "dashboard").split("/");
+  // The invitation landing page is public (the recipient has no account yet).
+  if (parts[0] === "invite") { await renderInvite(parts[1]); return; }
   if (!state.user) {
     try { await loadUser(); } catch { renderAuth(); return; }
   }
   try {
     switch (parts[0]) {
+      case "invite": await renderInvite(parts[1]); break;
       case "auth": state.user ? go("dashboard") : renderAuth(); break;
       case "new": renderNew(); break;
       case "topic": await renderTopic(parseInt(parts[1], 10)); break;

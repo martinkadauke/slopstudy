@@ -48,6 +48,17 @@ class RegisterBody(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     password: str = Field(min_length=8, max_length=200)
     language: str = "en"
+    invite: str | None = None
+
+
+@app.get("/api/auth-config")
+def auth_config():
+    """Public: tells the login screen whether registration needs an invite code."""
+    with db.connect() as con:
+        has_users = db.one(con, "SELECT 1 AS x FROM users LIMIT 1") is not None
+        require_invite = db.get_setting(con, "require_invite", "0") == "1"
+    # The very first account (the bootstrap admin) never needs an invite.
+    return {"require_invite": require_invite and has_users}
 
 
 class LoginBody(BaseModel):
@@ -65,17 +76,35 @@ def _set_session_cookie(response: Response, token: str):
 @app.post("/api/register")
 def register(body: RegisterBody, response: Response):
     language = body.language if body.language in ("en", "de") else "en"
+    email = str(body.email)
     with db.connect() as con:
-        if db.one(con, "SELECT id FROM users WHERE email=?", (body.email,)):
+        has_users = db.one(con, "SELECT 1 AS x FROM users LIMIT 1") is not None
+        require_invite = db.get_setting(con, "require_invite", "0") == "1"
+        invite_row = None
+        code = (body.invite or "").strip()
+        if code:
+            # A code always binds the account to the invited email (authoritative).
+            invite_row = db.one(
+                con, "SELECT code, email FROM invites WHERE code=? AND used_by IS NULL", (code,))
+            if not invite_row:
+                raise HTTPException(403, "invite_invalid")
+            if invite_row["email"]:
+                email = invite_row["email"]
+        elif require_invite and has_users:
+            # First account ever bootstraps the admin and bypasses the invite gate.
+            raise HTTPException(403, "invite_required")
+        if db.one(con, "SELECT id FROM users WHERE email=?", (email,)):
             raise HTTPException(409, "email_taken")
         cur = con.execute(
             """INSERT INTO users (email, name, password_hash, language, created_at)
                VALUES (?,?,?,?,?)""",
-            (body.email, body.name.strip(), auth.hash_password(body.password),
-             language, db.now()),
+            (email, body.name.strip(), auth.hash_password(body.password), language, db.now()),
         )
         user_id = cur.lastrowid
-    auth.sync_admin_flag(user_id, body.email)
+        if invite_row:
+            con.execute("UPDATE invites SET used_by=?, used_at=? WHERE code=?",
+                        (user_id, db.now(), invite_row["code"]))
+    auth.sync_admin_flag(user_id, email)
     _set_session_cookie(response, auth.create_token(user_id))
     return {"ok": True}
 
@@ -539,6 +568,83 @@ def admin_enrich_toggle(topic_id: int, action: str, admin: dict = Depends(auth.c
     with db.connect() as con:
         con.execute("UPDATE topics SET enrich_paused=? WHERE id=?",
                     (1 if action == "pause" else 0, topic_id))
+    return {"ok": True}
+
+
+# -------------------------------------------------- invite-only registration
+
+@app.get("/api/admin/invites")
+def admin_invites(admin: dict = Depends(auth.current_admin)):
+    with db.connect() as con:
+        require_invite = db.get_setting(con, "require_invite", "0") == "1"
+        items = db.all_rows(
+            con,
+            """SELECT i.code, i.email, i.note, i.created_at, i.used_at, u.name AS used_by_name
+               FROM invites i LEFT JOIN users u ON u.id = i.used_by
+               ORDER BY i.used_at IS NOT NULL, i.created_at DESC""",
+        )
+    for it in items:
+        it["link"] = _invite_link(it["code"]) if not it["used_at"] else ""
+    return {"require_invite": require_invite, "items": items, "smtp_enabled": emailer.smtp_configured()}
+
+
+class RequireInviteBody(BaseModel):
+    require_invite: bool
+
+
+@app.put("/api/admin/invites/require")
+def admin_set_require_invite(body: RequireInviteBody, admin: dict = Depends(auth.current_admin)):
+    with db.connect() as con:
+        db.set_setting(con, "require_invite", "1" if body.require_invite else "0")
+    return {"ok": True}
+
+
+def _invite_link(code: str) -> str:
+    base = os.environ.get("APP_BASE_URL", "http://localhost:8000").rstrip("/")
+    return f"{base}/#/invite/{code}"
+
+
+class InviteCreateBody(BaseModel):
+    email: EmailStr
+    note: str = Field(default="", max_length=120)
+
+
+@app.post("/api/admin/invites")
+def admin_create_invite(body: InviteCreateBody, admin: dict = Depends(auth.current_admin)):
+    code = secrets.token_urlsafe(24)
+    with db.connect() as con:
+        if db.one(con, "SELECT id FROM users WHERE email=?", (body.email,)):
+            raise HTTPException(409, "email_taken")
+        con.execute("INSERT INTO invites (code, email, note, created_at) VALUES (?,?,?,?)",
+                    (code, str(body.email), body.note.strip(), db.now()))
+    link = _invite_link(code)
+    emailed = False
+    if emailer.smtp_configured():
+        try:
+            subject, text = emailer.invitation_email(admin["language"], admin["name"], link)
+            emailer.send_invitation_sync(str(body.email), subject, text)
+            emailed = True
+        except Exception:
+            log.exception("Failed to send invitation email to %s", body.email)
+    # Always return the link so the admin can share it manually if email is off/failed.
+    return {"ok": True, "code": code, "link": link, "emailed": emailed}
+
+
+@app.get("/api/invite/{code}")
+def get_invite(code: str):
+    """Public: the invite screen uses this to pre-fill the invited email."""
+    with db.connect() as con:
+        row = db.one(con, "SELECT email FROM invites WHERE code=? AND used_by IS NULL", (code,))
+    if not row:
+        raise HTTPException(404, "invite_invalid")
+    return {"email": row["email"]}
+
+
+@app.delete("/api/admin/invites/{code}")
+def admin_delete_invite(code: str, admin: dict = Depends(auth.current_admin)):
+    with db.connect() as con:
+        # Only unused invites can be revoked; used ones stay as an audit trail.
+        con.execute("DELETE FROM invites WHERE code=? AND used_by IS NULL", (code,))
     return {"ok": True}
 
 

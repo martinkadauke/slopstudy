@@ -122,6 +122,15 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS invites (
+    code TEXT PRIMARY KEY,
+    email TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    used_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    used_at INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS idx_revisions_topic ON topic_revisions(topic_id);
 """
 
@@ -141,6 +150,7 @@ MIGRATIONS = [
     ("topics", "enrich_paused", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "last_report_at", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "is_admin", "INTEGER NOT NULL DEFAULT 0"),
+    ("invites", "email", "TEXT NOT NULL DEFAULT ''"),
     ("study_sessions", "jokers_json", "TEXT NOT NULL DEFAULT '{}'"),
 ]
 

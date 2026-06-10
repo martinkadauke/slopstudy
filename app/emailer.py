@@ -68,6 +68,37 @@ REPORT_STRINGS = {
 }
 
 
+INVITE_STRINGS = {
+    "en": {
+        "subject": "You're invited to SlopStudy",
+        "body": (
+            "Hi,\n\n{inviter} invited you to SlopStudy — AI-generated flashcards for studying.\n\n"
+            "Create your account here (your email is already filled in, just pick a password):\n"
+            "{link}\n\nSee you there!\nSlopStudy"
+        ),
+    },
+    "de": {
+        "subject": "Du wurdest zu SlopStudy eingeladen",
+        "body": (
+            "Hallo,\n\n{inviter} hat dich zu SlopStudy eingeladen — KI-generierte Karteikarten "
+            "zum Lernen.\n\n"
+            "Erstelle hier dein Konto (deine E-Mail ist schon eingetragen, du musst nur ein "
+            "Passwort wählen):\n{link}\n\nBis gleich!\nSlopStudy"
+        ),
+    },
+}
+
+
+def invitation_email(lang: str, inviter_name: str, link: str) -> tuple[str, str]:
+    s = INVITE_STRINGS.get(lang, INVITE_STRINGS["en"])
+    return s["subject"], s["body"].format(inviter=inviter_name, link=link)
+
+
+def send_invitation_sync(to_addr: str, subject: str, body: str):
+    """Synchronous send, used from the admin request handler (small, blocking)."""
+    _send_sync(to_addr, subject, body)
+
+
 def _report_strings(user: dict) -> dict:
     return REPORT_STRINGS.get(user.get("language", "en"), REPORT_STRINGS["en"])
 
