@@ -50,7 +50,7 @@ async def fetch_url(url: str) -> str:
     if not re.match(r"^https?://", url):
         raise ValueError(f"Invalid URL: {url}")
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        resp = await client.get(url, headers={"User-Agent": "FlashDeck/1.0"})
+        resp = await client.get(url, headers={"User-Agent": "SlopStudy/1.0"})
         resp.raise_for_status()
     content_type = resp.headers.get("content-type", "")
     if "pdf" in content_type or url.lower().endswith(".pdf"):

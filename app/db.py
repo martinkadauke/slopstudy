@@ -5,7 +5,8 @@ import time
 from contextlib import contextmanager
 
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
-DB_PATH = os.path.join(DATA_DIR, "flashdeck.db")
+DB_PATH = os.path.join(DATA_DIR, "slopstudy.db")
+LEGACY_DB_PATH = os.path.join(DATA_DIR, "flashdeck.db")  # pre-rename; migrated on first start
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 
 SCHEMA = """
@@ -102,10 +103,21 @@ CREATE TABLE IF NOT EXISTS answer_log (
     answered_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS topic_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    instruction TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued',  -- queued|processing|done|failed
+    result_msg TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_topics_user ON topics(user_id);
 CREATE INDEX IF NOT EXISTS idx_cards_topic ON cards(topic_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON study_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_answer_log_user ON answer_log(user_id, answered_at);
+CREATE INDEX IF NOT EXISTS idx_revisions_topic ON topic_revisions(topic_id);
 """
 
 # Columns added after the 1.0 schema; applied idempotently so existing
@@ -113,17 +125,37 @@ CREATE INDEX IF NOT EXISTS idx_answer_log_user ON answer_log(user_id, answered_a
 MIGRATIONS = [
     ("cards", "long_explanation", "TEXT NOT NULL DEFAULT ''"),
     ("cards", "sources_json", "TEXT NOT NULL DEFAULT ''"),
+    ("cards", "lang", "TEXT NOT NULL DEFAULT ''"),
+    ("cards", "translations_json", "TEXT NOT NULL DEFAULT ''"),
     ("topics", "material_json", "TEXT NOT NULL DEFAULT ''"),
     ("topics", "nightly_refresh", "INTEGER NOT NULL DEFAULT 0"),
     ("topics", "last_refresh_at", "INTEGER NOT NULL DEFAULT 0"),
+    ("topics", "queue_priority", "INTEGER NOT NULL DEFAULT 0"),
+    ("topics", "paused", "INTEGER NOT NULL DEFAULT 0"),
+    ("topics", "cancel_requested", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "last_report_at", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "is_admin", "INTEGER NOT NULL DEFAULT 0"),
     ("study_sessions", "jokers_json", "TEXT NOT NULL DEFAULT '{}'"),
 ]
+
+
+def _migrate_legacy_db():
+    """Rename a pre-rename flashdeck.db (and its WAL/SHM sidecars) to slopstudy.db.
+
+    Keeps existing deployments' accounts and decks intact across the app rename.
+    """
+    if os.path.exists(DB_PATH) or not os.path.exists(LEGACY_DB_PATH):
+        return
+    for suffix in ("", "-wal", "-shm"):
+        src, dst = LEGACY_DB_PATH + suffix, DB_PATH + suffix
+        if os.path.exists(src):
+            os.rename(src, dst)
 
 
 def init():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    _migrate_legacy_db()
     with connect() as con:
         con.executescript(SCHEMA)
         for table, col, decl in MIGRATIONS:

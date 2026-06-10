@@ -5,7 +5,7 @@ import os
 import smtplib
 from email.message import EmailMessage
 
-log = logging.getLogger("flashdeck.email")
+log = logging.getLogger("slopstudy.email")
 
 TEMPLATES = {
     "en": {
@@ -15,13 +15,13 @@ TEMPLATES = {
             'Your study topic "{title}" has finished generating: {cards} flashcards '
             "across {units} units are waiting for you.\n\n"
             "Start studying: {link}\n\n"
-            "Happy learning!\nFlashDeck"
+            "Happy learning!\nSlopStudy"
         ),
         "subject_failed": 'Generating "{title}" failed',
         "body_failed": (
             "Hi {name},\n\n"
             'Unfortunately, generating your study topic "{title}" failed:\n{error}\n\n'
-            "You can retry it from your dashboard: {link}\n\nFlashDeck"
+            "You can retry it from your dashboard: {link}\n\nSlopStudy"
         ),
     },
     "de": {
@@ -31,13 +31,13 @@ TEMPLATES = {
             'dein Lernthema "{title}" wurde fertig erstellt: {cards} Karteikarten '
             "in {units} Einheiten warten auf dich.\n\n"
             "Jetzt lernen: {link}\n\n"
-            "Viel Erfolg!\nFlashDeck"
+            "Viel Erfolg!\nSlopStudy"
         ),
         "subject_failed": 'Erstellung von "{title}" fehlgeschlagen',
         "body_failed": (
             "Hallo {name},\n\n"
             'die Erstellung deines Lernthemas "{title}" ist leider fehlgeschlagen:\n{error}\n\n'
-            "Du kannst es im Dashboard erneut versuchen: {link}\n\nFlashDeck"
+            "Du kannst es im Dashboard erneut versuchen: {link}\n\nSlopStudy"
         ),
     },
 }
@@ -45,7 +45,7 @@ TEMPLATES = {
 REPORT_STRINGS = {
     "en": {
         "subject": "Your study review: {n} concepts to revisit",
-        "footer": "\n\nStudy now: {link}\nFlashDeck — you can disable these emails in Settings.",
+        "footer": "\n\nStudy now: {link}\nSlopStudy — you can disable these emails in Settings.",
         "sources_heading": "Further reading:",
         "fallback_intro": (
             "Hi {name},\n\nhere are the concepts you missed recently. Read each explanation, "
@@ -56,7 +56,7 @@ REPORT_STRINGS = {
     },
     "de": {
         "subject": "Dein Lern-Review: {n} Konzepte zum Wiederholen",
-        "footer": "\n\nJetzt lernen: {link}\nFlashDeck — diese Mails kannst du in den Einstellungen abschalten.",
+        "footer": "\n\nJetzt lernen: {link}\nSlopStudy — diese Mails kannst du in den Einstellungen abschalten.",
         "sources_heading": "Weiterführende Quellen:",
         "fallback_intro": (
             "Hallo {name},\n\nhier sind die Konzepte, die du zuletzt falsch hattest. Lies die "
@@ -111,7 +111,7 @@ def _send_sync(to_addr: str, subject: str, body: str):
     user = os.environ.get("SMTP_USER", "")
     password = os.environ.get("SMTP_PASSWORD", "")
     security = os.environ.get("SMTP_SECURITY", "starttls").lower()  # starttls|ssl|none
-    from_addr = os.environ.get("SMTP_FROM", user or "flashdeck@localhost")
+    from_addr = os.environ.get("SMTP_FROM", user or "slopstudy@localhost")
 
     msg = EmailMessage()
     msg["From"] = from_addr

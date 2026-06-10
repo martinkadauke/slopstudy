@@ -422,6 +422,79 @@ async def generate_unit_material(
     }
 
 
+# ------------------------------------------------ card translation (bilingual)
+
+TRANSLATE_SYSTEM = """You translate a single flashcard into {target}. Translate faithfully and \
+naturally, the way a {target} textbook would phrase it. Keep established technical terms, proper \
+nouns, formulas, symbols and units intact (you may add the {target} term where natural). Do NOT \
+add, remove, or "improve" content — translate only.
+
+Translate these fields: "question", "choices" (keep the SAME order and count), "explanation", and \
+"long_explanation". Return them in JSON, plus echo the choices in order.
+
+Respond ONLY with JSON:
+{{"question": "...", "choices": ["..."], "explanation": "...", "long_explanation": "...", "answer": "..."}}
+For "answer": translate it the same way you translated the matching choice (for multiple choice) \
+or the canonical short answer; for yes/no cards keep it exactly "yes" or "no"."""
+
+TRANSLATE_USER = """CARD TYPE: {ctype}
+QUESTION: {question}
+CHOICES: {choices}
+CORRECT ANSWER: {answer}
+SHORT EXPLANATION: {explanation}
+LONG EXPLANATION: {long_explanation}"""
+
+
+async def translate_card(user: dict, card: dict, target_lang: str) -> dict:
+    """Translate one card's display fields into target_lang.
+
+    Returns {question, answer, choices, explanation, long_explanation}. The correct
+    answer is re-anchored to the translated choice by index so multiple-choice cards
+    stay internally consistent regardless of how the model phrases the answer.
+    """
+    choices = json.loads(card["choices_json"]) if card["choices_json"] else []
+    answer_index = None
+    for i, c in enumerate(choices):
+        if c.strip() == card["answer"].strip():
+            answer_index = i
+            break
+    data = await chat_json(
+        user,
+        TRANSLATE_SYSTEM.format(target=LANG_NAMES.get(target_lang, "English")),
+        TRANSLATE_USER.format(
+            ctype=card["type"], question=card["question"],
+            choices=json.dumps(choices, ensure_ascii=False) if choices else "(none)",
+            answer=card["answer"], explanation=card["explanation"] or "(none)",
+            long_explanation=card["long_explanation"] or "(none)",
+        ),
+    )
+    t_choices = [str(c).strip() for c in (data.get("choices") or []) if str(c).strip()]
+    if card["type"] == "multiple_choice" and len(t_choices) != len(choices):
+        # Length mismatch would desync the answer index — keep originals to stay safe.
+        t_choices = choices
+
+    if card["type"] == "yes_no":
+        t_answer = card["answer"]
+    elif card["type"] == "multiple_choice" and answer_index is not None \
+            and answer_index < len(t_choices):
+        t_answer = t_choices[answer_index]
+    else:
+        t_answer = str(data.get("answer", "")).strip() or card["answer"]
+
+    return {
+        "question": str(data.get("question", "")).strip() or card["question"],
+        "answer": t_answer,
+        "choices": t_choices,
+        "explanation": str(data.get("explanation", "")).strip() or card["explanation"],
+        "long_explanation": str(data.get("long_explanation", "")).strip()
+        or card["long_explanation"],
+    }
+
+
+def other_lang(lang: str) -> str:
+    return "en" if lang == "de" else "de"
+
+
 # ------------------------------------------------ weakness report (nightly email)
 
 REPORT_SYSTEM = """You are a supportive but rigorous study coach writing a personal review \
@@ -443,6 +516,67 @@ REPORT_USER = """LEARNER NAME: {name}
 
 MISSED FLASHCARDS (grouped by topic):
 {cards_block}"""
+
+
+# ------------------------------------------------ deck revision (natural language)
+
+REVISION_SYSTEM = """You edit an existing flashcard deck according to a user's natural-language \
+instruction. You can REMOVE existing cards and/or ADD new ones.
+
+You are given the deck's units and its current cards (each as "[id] (unit N) question").
+Interpret the instruction:
+- If it asks to remove/delete/drop something, put the matching card ids in "remove_ids".
+- If it asks to add/include more / harder / specific questions, set "add_count" (1-20) and write \
+"add_focus" describing exactly what the new cards should cover, and "add_unit_index" = the \
+0-based index of the most relevant existing unit.
+- It may ask for both. If nothing matches, return empty/zero values.
+
+Respond ONLY with JSON:
+{"remove_ids": [int], "add_count": int, "add_unit_index": int, "add_focus": "...",
+ "summary": "one short sentence describing the change you will make"}
+Write "summary" and "add_focus" in {language}."""
+
+REVISION_USER = """INSTRUCTION: {instruction}
+
+DECK TITLE: {title}
+UNITS:
+{units_block}
+
+CURRENT CARDS:
+{cards_block}"""
+
+
+async def plan_revision(user: dict, topic: dict, plan: dict, cards: list[dict],
+                        instruction: str) -> dict:
+    language = LANG_NAMES.get(topic["language"], "English")
+    units_block = "\n".join(
+        f"[{i}] {u.get('title', '')}" for i, u in enumerate(plan.get("units", [])))
+    cards_block = "\n".join(
+        f"[{c['id']}] (unit {c['unit_index']}) {c['question'][:120]}" for c in cards
+    ) or "(none)"
+    data = await chat_json(
+        user,
+        REVISION_SYSTEM.replace("{language}", language),
+        REVISION_USER.format(instruction=instruction[:1000], title=plan.get("title", ""),
+                             units_block=units_block, cards_block=cards_block),
+    )
+    valid_ids = {c["id"] for c in cards}
+    remove_ids = [i for i in (data.get("remove_ids") or []) if isinstance(i, int) and i in valid_ids]
+    try:
+        add_count = max(0, min(20, int(data.get("add_count", 0))))
+    except (TypeError, ValueError):
+        add_count = 0
+    try:
+        add_unit = max(0, min(len(plan.get("units", [1])) - 1, int(data.get("add_unit_index", 0))))
+    except (TypeError, ValueError):
+        add_unit = 0
+    return {
+        "remove_ids": remove_ids,
+        "add_count": add_count,
+        "add_unit_index": add_unit,
+        "add_focus": str(data.get("add_focus", "")).strip(),
+        "summary": str(data.get("summary", "")).strip(),
+    }
 
 
 async def generate_weakness_report(user: dict, cards_block: str) -> str:

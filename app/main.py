@@ -1,4 +1,4 @@
-"""FlashDeck — self-hosted AI flashcard study app (single container)."""
+"""SlopStudy — self-hosted AI flashcard study app (single container)."""
 import asyncio
 import json
 import logging
@@ -17,7 +17,7 @@ from pydantic import BaseModel, EmailStr, Field
 from . import auth, db, emailer, gamification as game, llm, worker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-log = logging.getLogger("flashdeck")
+log = logging.getLogger("slopstudy")
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")
 SESSION_SIZE_DEFAULT = 10
@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI):
     task.cancel()
 
 
-app = FastAPI(title="FlashDeck", lifespan=lifespan)
+app = FastAPI(title="SlopStudy", lifespan=lifespan)
 
 
 @app.get("/api/health")
@@ -75,6 +75,7 @@ def register(body: RegisterBody, response: Response):
              language, db.now()),
         )
         user_id = cur.lastrowid
+    auth.sync_admin_flag(user_id, body.email)
     _set_session_cookie(response, auth.create_token(user_id))
     return {"ok": True}
 
@@ -85,6 +86,7 @@ def login(body: LoginBody, response: Response):
         user = db.one(con, "SELECT * FROM users WHERE email=?", (body.email,))
     if not user or not auth.verify_password(body.password, user["password_hash"]):
         raise HTTPException(401, "invalid_credentials")
+    auth.sync_admin_flag(user["id"], user["email"])
     _set_session_cookie(response, auth.create_token(user["id"]))
     return {"ok": True}
 
@@ -110,6 +112,7 @@ def _public_user(user: dict) -> dict:
         "email_notifications": bool(user["email_notifications"]),
         "points": user["points"], "lifetime_points": user["lifetime_points"],
         "level": info, "smtp_enabled": emailer.smtp_configured(),
+        "is_admin": bool(user["is_admin"]),
     }
 
 
@@ -277,8 +280,13 @@ def list_topics(user: dict = Depends(auth.current_user)):
         return [_topic_summary(con, t) for t in topics]
 
 
-def _own_topic(con, topic_id: int, user_id: int) -> dict:
-    topic = db.one(con, "SELECT * FROM topics WHERE id=? AND user_id=?", (topic_id, user_id))
+def _own_topic(con, topic_id: int, user: dict) -> dict:
+    """Fetch a topic the user owns — or any topic if the user is an admin."""
+    if user.get("is_admin"):
+        topic = db.one(con, "SELECT * FROM topics WHERE id=?", (topic_id,))
+    else:
+        topic = db.one(con, "SELECT * FROM topics WHERE id=? AND user_id=?",
+                       (topic_id, user["id"]))
     if not topic:
         raise HTTPException(404, "topic_not_found")
     return topic
@@ -287,7 +295,7 @@ def _own_topic(con, topic_id: int, user_id: int) -> dict:
 @app.get("/api/topics/{topic_id}")
 def get_topic(topic_id: int, user: dict = Depends(auth.current_user)):
     with db.connect() as con:
-        topic = _own_topic(con, topic_id, user["id"])
+        topic = _own_topic(con, topic_id, user)
         out = _topic_summary(con, topic)
         out["plan"] = json.loads(topic["plan_json"]) if topic["plan_json"] else None
         out["material"] = json.loads(topic["material_json"]) if topic["material_json"] else []
@@ -314,7 +322,7 @@ class TopicSettingsBody(BaseModel):
 def update_topic(topic_id: int, body: TopicSettingsBody,
                  user: dict = Depends(auth.current_user)):
     with db.connect() as con:
-        _own_topic(con, topic_id, user["id"])
+        _own_topic(con, topic_id, user)
         con.execute("UPDATE topics SET nightly_refresh=? WHERE id=?",
                     (int(body.nightly_refresh), topic_id))
     return {"ok": True}
@@ -323,7 +331,7 @@ def update_topic(topic_id: int, body: TopicSettingsBody,
 @app.delete("/api/topics/{topic_id}")
 def delete_topic(topic_id: int, user: dict = Depends(auth.current_user)):
     with db.connect() as con:
-        _own_topic(con, topic_id, user["id"])
+        _own_topic(con, topic_id, user)
         for s in db.all_rows(con, "SELECT file_path FROM sources WHERE topic_id=?", (topic_id,)):
             if s["file_path"] and os.path.exists(s["file_path"]):
                 os.remove(s["file_path"])
@@ -334,14 +342,143 @@ def delete_topic(topic_id: int, user: dict = Depends(auth.current_user)):
 @app.post("/api/topics/{topic_id}/retry")
 def retry_topic(topic_id: int, user: dict = Depends(auth.current_user)):
     with db.connect() as con:
-        topic = _own_topic(con, topic_id, user["id"])
-        if topic["status"] != "failed":
+        topic = _own_topic(con, topic_id, user)
+        if topic["status"] not in ("failed", "stopped"):
             raise HTTPException(409, "not_failed")
         con.execute("DELETE FROM cards WHERE topic_id=?", (topic_id,))
         con.execute(
-            "UPDATE topics SET status='queued', error='', progress_pct=0, plan_json='' WHERE id=?",
+            "UPDATE topics SET status='queued', error='', progress_pct=0, plan_json='', "
+            "material_json='', cancel_requested=0 WHERE id=?",
             (topic_id,),
         )
+    return {"ok": True}
+
+
+# -------------------------------------------------- deck revision (creator or admin)
+
+class ReviseBody(BaseModel):
+    instruction: str = Field(min_length=3, max_length=1000)
+
+
+@app.post("/api/topics/{topic_id}/revise")
+def revise_topic(topic_id: int, body: ReviseBody, user: dict = Depends(auth.current_user)):
+    """Queue a natural-language deck edit (add/remove cards). Creator or admin only."""
+    with db.connect() as con:
+        topic = _own_topic(con, topic_id, user)  # 404 unless owner/admin
+        if topic["status"] not in ("ready", "stopped"):
+            raise HTTPException(409, "topic_not_ready")
+        if not topic["plan_json"]:
+            raise HTTPException(409, "no_plan")
+        con.execute(
+            """INSERT INTO topic_revisions (topic_id, user_id, instruction, created_at)
+               VALUES (?,?,?,?)""",
+            (topic_id, user["id"], body.instruction.strip(), db.now()),
+        )
+    return {"ok": True}
+
+
+@app.get("/api/topics/{topic_id}/revisions")
+def list_revisions(topic_id: int, user: dict = Depends(auth.current_user)):
+    with db.connect() as con:
+        _own_topic(con, topic_id, user)
+        return db.all_rows(
+            con,
+            """SELECT id, instruction, status, result_msg, created_at
+               FROM topic_revisions WHERE topic_id=? ORDER BY id DESC LIMIT 20""",
+            (topic_id,),
+        )
+
+
+# ---------------------------------------------------------------- admin
+
+def _admin_topic_row(con, topic: dict) -> dict:
+    out = _topic_summary(con, topic)
+    owner = db.one(con, "SELECT name, email FROM users WHERE id=?", (topic["user_id"],))
+    out["owner"] = owner["name"] if owner else "?"
+    out["owner_email"] = owner["email"] if owner else ""
+    out["paused"] = bool(topic["paused"])
+    out["queue_priority"] = topic["queue_priority"]
+    return out
+
+
+@app.get("/api/admin/topics")
+def admin_topics(admin: dict = Depends(auth.current_admin)):
+    with db.connect() as con:
+        topics = db.all_rows(
+            con,
+            """SELECT * FROM topics
+               ORDER BY CASE status WHEN 'processing' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,
+                        queue_priority, id DESC""",
+        )
+        return [_admin_topic_row(con, t) for t in topics]
+
+
+@app.get("/api/admin/users")
+def admin_users(admin: dict = Depends(auth.current_admin)):
+    with db.connect() as con:
+        return db.all_rows(
+            con,
+            """SELECT u.id, u.name, u.email, u.is_admin, u.lifetime_points, u.created_at,
+                      (SELECT COUNT(*) FROM topics t WHERE t.user_id=u.id) AS topics
+               FROM users u ORDER BY u.id""",
+        )
+
+
+class AdminUserBody(BaseModel):
+    is_admin: bool
+
+
+@app.put("/api/admin/users/{user_id}")
+def admin_set_user(user_id: int, body: AdminUserBody, admin: dict = Depends(auth.current_admin)):
+    if user_id == admin["id"] and not body.is_admin:
+        raise HTTPException(409, "cannot_demote_self")
+    with db.connect() as con:
+        if not db.one(con, "SELECT id FROM users WHERE id=?", (user_id,)):
+            raise HTTPException(404, "user_not_found")
+        con.execute("UPDATE users SET is_admin=? WHERE id=?", (int(body.is_admin), user_id))
+    return {"ok": True}
+
+
+@app.post("/api/admin/topics/{topic_id}/pause")
+def admin_pause(topic_id: int, admin: dict = Depends(auth.current_admin)):
+    with db.connect() as con:
+        con.execute("UPDATE topics SET paused=1 WHERE id=? AND status='queued'", (topic_id,))
+    return {"ok": True}
+
+
+@app.post("/api/admin/topics/{topic_id}/resume")
+def admin_resume(topic_id: int, admin: dict = Depends(auth.current_admin)):
+    with db.connect() as con:
+        con.execute("UPDATE topics SET paused=0 WHERE id=?", (topic_id,))
+    return {"ok": True}
+
+
+@app.post("/api/admin/topics/{topic_id}/stop")
+def admin_stop(topic_id: int, admin: dict = Depends(auth.current_admin)):
+    """Stop a queued or in-progress topic. Processing topics cancel at the next unit."""
+    with db.connect() as con:
+        topic = db.one(con, "SELECT status FROM topics WHERE id=?", (topic_id,))
+        if not topic:
+            raise HTTPException(404, "topic_not_found")
+        if topic["status"] == "processing":
+            con.execute("UPDATE topics SET cancel_requested=1 WHERE id=?", (topic_id,))
+        elif topic["status"] == "queued":
+            con.execute(
+                "UPDATE topics SET status='stopped', error='Stopped by admin', paused=0 WHERE id=?",
+                (topic_id,),
+            )
+    return {"ok": True}
+
+
+class QueueOrderBody(BaseModel):
+    order: list[int]  # topic ids, desired processing order
+
+
+@app.post("/api/admin/queue/reorder")
+def admin_reorder(body: QueueOrderBody, admin: dict = Depends(auth.current_admin)):
+    with db.connect() as con:
+        for priority, topic_id in enumerate(body.order):
+            con.execute("UPDATE topics SET queue_priority=? WHERE id=?", (priority, topic_id))
     return {"ok": True}
 
 
@@ -357,11 +494,40 @@ def _count_due(con, user_id: int, topic_id: int) -> int:
     )["c"]
 
 
-def _card_payload(card: dict, reveal: bool = False) -> dict:
-    out = {
-        "id": card["id"], "type": card["type"], "question": card["question"],
-        "difficulty": card["difficulty"],
+def _card_view(card: dict, want_lang: str, topic_lang: str) -> dict:
+    """Resolve a card's display fields in the requested language.
+
+    Falls back to the card's original-generation language when no translation
+    exists yet (translation happens in the background after generation).
+    """
+    base = {
+        "question": card["question"],
+        "answer": card["answer"],
         "choices": json.loads(card["choices_json"]) if card["choices_json"] else [],
+        "explanation": card["explanation"],
+        "long_explanation": card["long_explanation"],
+    }
+    base_lang = card["lang"] or topic_lang
+    if want_lang == base_lang:
+        return base
+    trans = json.loads(card["translations_json"]) if card["translations_json"] else {}
+    t = trans.get(want_lang)
+    if not t:
+        return base
+    return {
+        "question": t.get("question") or base["question"],
+        "answer": t.get("answer") or base["answer"],
+        "choices": t.get("choices") or base["choices"],
+        "explanation": t.get("explanation") or base["explanation"],
+        "long_explanation": t.get("long_explanation") or base["long_explanation"],
+    }
+
+
+def _card_payload(card: dict, view: dict, reveal: bool = False) -> dict:
+    out = {
+        "id": card["id"], "type": card["type"], "question": view["question"],
+        "difficulty": card["difficulty"],
+        "choices": view["choices"],
         "skip_cost": game.skip_cost(card["difficulty"]),
         "fifty_cost": game.fifty_cost(card["difficulty"]),
         "points_correct": game.points_correct(card["difficulty"]),
@@ -369,8 +535,8 @@ def _card_payload(card: dict, reveal: bool = False) -> dict:
         "unit_index": card["unit_index"],
     }
     if reveal:
-        out["answer"] = card["answer"]
-        out["explanation"] = card["explanation"]
+        out["answer"] = view["answer"]
+        out["explanation"] = view["explanation"]
     return out
 
 
@@ -383,7 +549,7 @@ class StartSessionBody(BaseModel):
 def start_session(body: StartSessionBody, user: dict = Depends(auth.current_user)):
     size = max(3, min(30, body.size))
     with db.connect() as con:
-        topic = _own_topic(con, body.topic_id, user["id"])
+        topic = _own_topic(con, body.topic_id, user)
         if topic["status"] != "ready":
             raise HTTPException(409, "topic_not_ready")
         # Due reviews and unseen cards first (unseen in plan order), then earliest-due refreshers.
@@ -408,11 +574,13 @@ def start_session(body: StartSessionBody, user: dict = Depends(auth.current_user
         )
         session_id = cur.lastrowid
         points = db.one(con, "SELECT points FROM users WHERE id=?", (user["id"],))["points"]
+    lang = user["language"]
     return {
         "session_id": session_id,
         "topic_title": topic["title"] or topic["prompt"][:60],
         # Self-graded 'open' cards need the model answer client-side at reveal time.
-        "cards": [_card_payload(c, reveal=(c["type"] == "open")) for c in cards],
+        "cards": [_card_payload(c, _card_view(c, lang, topic["language"]),
+                                reveal=(c["type"] == "open")) for c in cards],
         "points": points,
     }
 
@@ -512,7 +680,12 @@ def answer_card(session_id: int, body: AnswerBody, user: dict = Depends(auth.cur
         if str(body.card_id) in answered:
             raise HTTPException(409, "already_answered")
         card = db.one(con, "SELECT * FROM cards WHERE id=?", (body.card_id,))
-        correct = _check_answer(card, body.answer, body.self_grade)
+        topic_lang = db.one(con, "SELECT language FROM topics WHERE id=?",
+                            (card["topic_id"],))["language"]
+        # Check against the same language the learner was shown.
+        view = _card_view(card, user["language"], topic_lang)
+        correct = _check_answer({"type": card["type"], "answer": view["answer"]},
+                                body.answer, body.self_grade)
         delta = game.points_correct(card["difficulty"]) if correct \
             else game.points_wrong(card["difficulty"])
         new_points = game.apply_points(con, user["id"], delta)
@@ -526,8 +699,8 @@ def answer_card(session_id: int, body: AnswerBody, user: dict = Depends(auth.cur
         _log_answer(con, user["id"], session, card, result)
     return {
         "correct": correct, "points_delta": delta, "points": new_points,
-        "answer": card["answer"], "explanation": card["explanation"],
-        "long_explanation": card["long_explanation"],
+        "answer": view["answer"], "explanation": view["explanation"],
+        "long_explanation": view["long_explanation"],
         "web_sources": json.loads(card["sources_json"] or "[]"),
     }
 
@@ -581,14 +754,18 @@ def fifty_joker(session_id: int, body: FiftyBody, user: dict = Depends(auth.curr
         if str(body.card_id) in jokers:
             raise HTTPException(409, "joker_used")
         card = db.one(con, "SELECT * FROM cards WHERE id=?", (body.card_id,))
-        choices = json.loads(card["choices_json"] or "[]")
+        topic_lang = db.one(con, "SELECT language FROM topics WHERE id=?",
+                            (card["topic_id"],))["language"]
+        # Operate on the choices in the language the learner is actually seeing.
+        view = _card_view(card, user["language"], topic_lang)
+        choices = view["choices"]
         if card["type"] != "multiple_choice" or len(choices) < 4:
             raise HTTPException(422, "joker_not_applicable")
         cost = game.fifty_cost(card["difficulty"])
         balance = db.one(con, "SELECT points FROM users WHERE id=?", (user["id"],))["points"]
         if balance < cost:
             raise HTTPException(402, "not_enough_points")
-        wrong = [c for c in choices if c.strip() != card["answer"].strip()]
+        wrong = [c for c in choices if c.strip() != view["answer"].strip()]
         remove = random.sample(wrong, len(choices) // 2)
         new_points = game.apply_points(con, user["id"], -cost)
         jokers[str(body.card_id)] = remove

@@ -28,23 +28,26 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: check
     runs-on: self-hosted
-    concurrency: deploy-flashdeck
+    concurrency: deploy-slopstudy
     steps:
       - uses: actions/checkout@v4
       - name: Build image
-        run: docker build -t flashdeck:${{ github.sha }} -t flashdeck:latest .
+        run: docker build -t slopstudy:${{ github.sha }} -t slopstudy:latest .
       - name: Swap container
         run: |
-          docker rm -f flashdeck 2>/dev/null || true
-          docker run -d --name flashdeck --restart unless-stopped \
+          # Remove the running container (and the pre-rename 'flashdeck' one, if present).
+          docker rm -f slopstudy flashdeck 2>/dev/null || true
+          # Data + .env stay under the original appdata path; the DB auto-migrates
+          # flashdeck.db -> slopstudy.db inside it on first start.
+          docker run -d --name slopstudy --restart unless-stopped \
             -p 8090:8000 \
             -v /mnt/user/appdata/flashdeck/data:/data \
             --env-file /mnt/user/appdata/flashdeck/.env \
-            flashdeck:latest
+            slopstudy:latest
       - name: Health check
         run: |
           sleep 8
-          docker exec flashdeck python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"
-          echo "Deployed $(docker ps --filter name=flashdeck --format '{{.Status}}')"
+          docker exec slopstudy python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"
+          echo "Deployed $(docker ps --filter name=slopstudy --format '{{.Status}}')"
       - name: Prune old images
         run: docker image prune -f

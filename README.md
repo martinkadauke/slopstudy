@@ -1,4 +1,4 @@
-# 🎴 FlashDeck
+# 🎴 SlopStudy
 
 Self-hosted, single-container flashcard study app powered by **your own Ollama instance**.
 
@@ -35,7 +35,16 @@ of flashcards from it. You get an email when the deck is ready.
   existing cards
 - 🔁 Spaced-repetition-lite scheduling (due cards come back at growing intervals); decks can be
   re-run indefinitely and every answer is logged
-- 🌍 English & German UI, dark/light mode, editable profile
+- 🌍 **Fully bilingual (EN/DE)** — not just the UI: every card is generated in the creator's
+  language and then translated to the other language in the background, so toggling German
+  switches the questions, answers and explanations too (falls back to the original language
+  until a card's translation is ready)
+- 🛡️ **Admin role** — admins see every user's topics, control the generation queue (reorder,
+  pause, resume, stop), delete any topic, and promote/demote other admins
+- ✏️ **Edit decks in plain language** — the creator (or an admin) can type instructions like
+  "add 8 harder questions about X" or "remove the questions about Y"; the AI applies them in the
+  background
+- 🌍 dark/light mode, editable profile
 - 📱 Responsive — works on phones and desktops
 
 ## Quick start
@@ -62,9 +71,9 @@ small models may fail to produce valid JSON and the topic will be marked failed 
 ### Without compose
 
 ```bash
-docker build -t flashdeck .
-docker run -d -p 8000:8000 -v flashdeck_data:/data --env-file .env \
-  --add-host host.docker.internal:host-gateway flashdeck
+docker build -t slopstudy .
+docker run -d -p 8000:8000 -v slopstudy_data:/data --env-file .env \
+  --add-host host.docker.internal:host-gateway slopstudy
 ```
 
 ### Hosting on the internet
@@ -78,6 +87,7 @@ Put the container behind a reverse proxy with TLS (Caddy, Traefik, nginx), set
 |---|---|---|
 | `APP_BASE_URL` | `http://localhost:8000` | Link used in notification emails |
 | `COOKIE_SECURE` | `false` | Set `true` behind HTTPS |
+| `ADMIN_EMAILS` | *(empty)* | Comma-separated emails auto-granted admin; the first registered user is admin too |
 | `SMTP_HOST` | *(empty = email disabled)* | SMTP server |
 | `SMTP_PORT` | `587` | SMTP port |
 | `SMTP_USER` / `SMTP_PASSWORD` | | SMTP credentials (optional) |

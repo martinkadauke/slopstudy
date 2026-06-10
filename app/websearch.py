@@ -15,7 +15,7 @@ import urllib.parse
 import httpx
 from bs4 import BeautifulSoup
 
-log = logging.getLogger("flashdeck.websearch")
+log = logging.getLogger("slopstudy.websearch")
 
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "").rstrip("/")
 

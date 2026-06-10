@@ -17,7 +17,7 @@ from datetime import datetime
 
 from . import db, emailer, extract, llm, websearch
 
-log = logging.getLogger("flashdeck.worker")
+log = logging.getLogger("slopstudy.worker")
 
 POLL_INTERVAL = 3
 ENRICH_CARDS_PER_STEP = 2
@@ -38,12 +38,15 @@ _report_checked: dict[int, str] = {}
 async def run_forever():
     with db.connect() as con:
         con.execute("UPDATE topics SET status='queued', progress_pct=0 WHERE status='processing'")
+        con.execute("UPDATE topic_revisions SET status='queued' WHERE status='processing'")
     log.info("Worker started (report hour: %02d:00)", REPORT_HOUR)
     while True:
         try:
             topic = _next_queued()
             if topic:
                 await _process(topic)
+                continue
+            if await _process_revision():
                 continue
             if await _enrich_step():
                 continue
@@ -59,8 +62,30 @@ async def run_forever():
 
 
 def _next_queued():
+    # Admin-controllable queue: lower queue_priority first, then FIFO; paused topics wait.
     with db.connect() as con:
-        return db.one(con, "SELECT * FROM topics WHERE status='queued' ORDER BY id LIMIT 1")
+        return db.one(
+            con,
+            """SELECT * FROM topics WHERE status='queued' AND paused=0
+               ORDER BY queue_priority, id LIMIT 1""",
+        )
+
+
+def _is_cancelled(topic_id: int) -> bool:
+    with db.connect() as con:
+        row = db.one(con, "SELECT cancel_requested FROM topics WHERE id=?", (topic_id,))
+    return bool(row and row["cancel_requested"])
+
+
+def _insert_card(con, topic_id: int, unit_index: int, lang: str, card: dict):
+    con.execute(
+        """INSERT INTO cards (topic_id, unit_index, type, question, answer,
+           choices_json, explanation, difficulty, lang, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (topic_id, unit_index, card["type"], card["question"], card["answer"],
+         json.dumps(card["choices"], ensure_ascii=False),
+         card["explanation"], card["difficulty"], lang, db.now()),
+    )
 
 
 def _update(topic_id: int, **fields):
@@ -109,6 +134,11 @@ async def _process(topic: dict):
         per_unit = llm.cards_per_unit(topic["card_count"], len(units))
         total_cards = 0
         for i in range(len(units)):
+            if _is_cancelled(topic_id):
+                _update(topic_id, status="stopped", progress_msg="", progress_pct=0,
+                        cancel_requested=0, error="Stopped by admin")
+                log.info("Topic %s cancelled mid-generation", topic_id)
+                return
             _update(topic_id, progress_msg=f"generating_unit:{i + 1}/{len(units)}",
                     progress_pct=15 + int(80 * i / len(units)))
             try:
@@ -120,14 +150,7 @@ async def _process(topic: dict):
                 continue
             with db.connect() as con:
                 for card in cards:
-                    con.execute(
-                        """INSERT INTO cards (topic_id, unit_index, type, question, answer,
-                           choices_json, explanation, difficulty, created_at)
-                           VALUES (?,?,?,?,?,?,?,?,?)""",
-                        (topic_id, i, card["type"], card["question"], card["answer"],
-                         json.dumps(card["choices"], ensure_ascii=False),
-                         card["explanation"], card["difficulty"], db.now()),
-                    )
+                    _insert_card(con, topic_id, i, topic["language"], card)
             total_cards += len(cards)
 
         if total_cards == 0:
@@ -143,6 +166,75 @@ async def _process(topic: dict):
         log.exception("Topic %s failed", topic_id)
         _update(topic_id, status="failed", error=message[:500], progress_pct=0)
         await emailer.send_topic_failed(user, topic, message[:500])
+
+
+# ------------------------------------------------------------- revisions
+
+async def _process_revision() -> bool:
+    """Apply one queued natural-language deck edit (add/remove cards)."""
+    with db.connect() as con:
+        rev = db.one(con, "SELECT * FROM topic_revisions WHERE status='queued' ORDER BY id LIMIT 1")
+        if not rev:
+            return False
+        topic = db.one(con, "SELECT * FROM topics WHERE id=?", (rev["topic_id"],))
+        user = db.one(con, "SELECT * FROM users WHERE id=?", (rev["user_id"],))
+        con.execute("UPDATE topic_revisions SET status='processing' WHERE id=?", (rev["id"],))
+    if not topic or not user or not topic["plan_json"]:
+        with db.connect() as con:
+            con.execute("UPDATE topic_revisions SET status='failed', result_msg=? WHERE id=?",
+                        ("Topic unavailable", rev["id"]))
+        return True
+
+    plan = json.loads(topic["plan_json"])
+    try:
+        with db.connect() as con:
+            cards = db.all_rows(
+                con, "SELECT id, unit_index, question FROM cards WHERE topic_id=? ORDER BY id",
+                (topic["id"],))
+            srcs = db.all_rows(con, "SELECT * FROM sources WHERE topic_id=?", (topic["id"],))
+        decision = await llm.plan_revision(user, topic, plan, cards, rev["instruction"])
+
+        removed = 0
+        if decision["remove_ids"]:
+            with db.connect() as con:
+                con.execute(
+                    "DELETE FROM cards WHERE topic_id=? AND id IN (%s)"
+                    % ",".join("?" * len(decision["remove_ids"])),
+                    (topic["id"], *decision["remove_ids"]),
+                )
+                removed = con.execute("SELECT changes()").fetchone()[0]
+
+        added = 0
+        if decision["add_count"] > 0:
+            unit_idx = decision["add_unit_index"]
+            # Inject the requested focus into the unit so generation targets it.
+            unit = dict(plan["units"][unit_idx])
+            if decision["add_focus"]:
+                unit = {**unit, "title": decision["add_focus"] or unit.get("title", ""),
+                        "objectives": [decision["add_focus"]] + unit.get("objectives", [])}
+            synth_plan = {**plan, "units": [unit]}
+            existing_q = [c["question"] for c in cards]
+            new_cards = await llm.generate_unit_cards(
+                user, topic, synth_plan, 0, decision["add_count"],
+                extract.combine_sources(srcs), avoid_questions=existing_q)
+            with db.connect() as con:
+                for card in new_cards:
+                    _insert_card(con, topic["id"], unit_idx, topic["language"], card)
+            added = len(new_cards)
+
+        summary = decision["summary"] or f"+{added} / -{removed} cards"
+        result = f"{summary} (added {added}, removed {removed})"
+        with db.connect() as con:
+            con.execute("UPDATE topic_revisions SET status='done', result_msg=? WHERE id=?",
+                        (result, rev["id"]))
+        log.info("Revision %s on topic %s: %s", rev["id"], topic["id"], result)
+    except Exception as e:
+        msg = str(e) if isinstance(e, llm.OllamaError) else f"Unexpected error: {e}"
+        log.exception("Revision %s failed", rev["id"])
+        with db.connect() as con:
+            con.execute("UPDATE topic_revisions SET status='failed', result_msg=? WHERE id=?",
+                        (msg[:300], rev["id"]))
+    return True
 
 
 # ------------------------------------------------------------- enrichment
@@ -165,6 +257,8 @@ async def _enrich_step() -> bool:
                WHERE t.status='ready' AND t.plan_json != '' AND (
                  t.material_json = ''
                  OR EXISTS (SELECT 1 FROM cards c WHERE c.topic_id=t.id AND c.sources_json='')
+                 OR EXISTS (SELECT 1 FROM cards c WHERE c.topic_id=t.id
+                            AND c.sources_json != '' AND c.translations_json='')
                ) ORDER BY t.id LIMIT 1""",
         )
         if not topic:
@@ -210,32 +304,78 @@ async def _enrich_step() -> bool:
             con, "SELECT * FROM cards WHERE topic_id=? AND sources_json='' ORDER BY id LIMIT ?",
             (topic["id"], ENRICH_CARDS_PER_STEP),
         )
-        remaining = db.one(con, "SELECT COUNT(*) AS c FROM cards WHERE topic_id=? AND sources_json=''",
-                           (topic["id"],))["c"]
-    _update(topic["id"], progress_msg=f"enriching_cards:{remaining}")
+    if cards:
+        with db.connect() as con:
+            remaining = db.one(
+                con, "SELECT COUNT(*) AS c FROM cards WHERE topic_id=? AND sources_json=''",
+                (topic["id"],))["c"]
+        _update(topic["id"], progress_msg=f"enriching_cards:{remaining}")
+        for card in cards:
+            key = f"card:{card['id']}"
+            try:
+                results = await websearch.search(f"{topic['title']} {card['question'][:120]}")
+                data = await llm.enrich_card(user, topic, card, results)
+                with db.connect() as con:
+                    con.execute(
+                        "UPDATE cards SET long_explanation=?, sources_json=? WHERE id=?",
+                        (data["explanation"], json.dumps(data["sources"], ensure_ascii=False),
+                         card["id"]),
+                    )
+                _fail_counts.pop(key, None)
+            except Exception as e:
+                log.warning("Enriching card %s failed: %s", card["id"], e)
+                if _record_failure(key):
+                    with db.connect() as con:
+                        con.execute("UPDATE cards SET sources_json='[]' WHERE id=?", (card["id"],))
+                else:
+                    await asyncio.sleep(POLL_INTERVAL)
+                    return True
+        if remaining <= len(cards):
+            log.info("Enrichment for topic %s complete", topic["id"])
+        return True
+
+    # Phase 3: translate each card into the other language (so the UI can show the
+    # whole deck — questions, answers, explanations — in German or English).
+    with db.connect() as con:
+        cards = db.all_rows(
+            con,
+            """SELECT * FROM cards WHERE topic_id=? AND sources_json != ''
+               AND translations_json='' ORDER BY id LIMIT ?""",
+            (topic["id"], ENRICH_CARDS_PER_STEP),
+        )
+        remaining = db.one(
+            con,
+            """SELECT COUNT(*) AS c FROM cards WHERE topic_id=? AND sources_json != ''
+               AND translations_json=''""",
+            (topic["id"],))["c"]
+    if not cards:
+        _update(topic["id"], progress_msg="")
+        return True
+    _update(topic["id"], progress_msg=f"translating_cards:{remaining}")
     for card in cards:
-        key = f"card:{card['id']}"
+        key = f"trans:{card['id']}"
+        base_lang = card["lang"] or topic["language"]
+        target = llm.other_lang(base_lang)
         try:
-            results = await websearch.search(f"{topic['title']} {card['question'][:120]}")
-            data = await llm.enrich_card(user, topic, card, results)
+            translated = await llm.translate_card(user, card, target)
             with db.connect() as con:
                 con.execute(
-                    "UPDATE cards SET long_explanation=?, sources_json=? WHERE id=?",
-                    (data["explanation"], json.dumps(data["sources"], ensure_ascii=False),
-                     card["id"]),
+                    "UPDATE cards SET translations_json=? WHERE id=?",
+                    (json.dumps({target: translated}, ensure_ascii=False), card["id"]),
                 )
             _fail_counts.pop(key, None)
         except Exception as e:
-            log.warning("Enriching card %s failed: %s", card["id"], e)
+            log.warning("Translating card %s failed: %s", card["id"], e)
             if _record_failure(key):
+                # Mark as attempted so we stop retrying; UI falls back to base language.
                 with db.connect() as con:
-                    con.execute("UPDATE cards SET sources_json='[]' WHERE id=?", (card["id"],))
+                    con.execute("UPDATE cards SET translations_json='{}' WHERE id=?", (card["id"],))
             else:
                 await asyncio.sleep(POLL_INTERVAL)
                 return True
     if remaining <= len(cards):
         _update(topic["id"], progress_msg="")
-        log.info("Enrichment for topic %s complete", topic["id"])
+        log.info("Translation for topic %s complete", topic["id"])
     return True
 
 
@@ -289,14 +429,7 @@ async def _maybe_refresh_topics() -> bool:
         )
         with db.connect() as con:
             for card in cards:
-                con.execute(
-                    """INSERT INTO cards (topic_id, unit_index, type, question, answer,
-                       choices_json, explanation, difficulty, created_at)
-                       VALUES (?,?,?,?,?,?,?,?,?)""",
-                    (topic["id"], unit_index, card["type"], card["question"], card["answer"],
-                     json.dumps(card["choices"], ensure_ascii=False),
-                     card["explanation"], card["difficulty"], db.now()),
-                )
+                _insert_card(con, topic["id"], unit_index, topic["language"], card)
             con.execute("UPDATE topics SET last_refresh_at=? WHERE id=?",
                         (db.now(), topic["id"]))
         _fail_counts.pop(key, None)

@@ -1,4 +1,4 @@
-/* FlashDeck SPA — no build step, hash routing. */
+/* SlopStudy SPA — no build step, hash routing. */
 "use strict";
 
 const state = {
@@ -93,11 +93,12 @@ function shell(content) {
   return `
   <div class="shell">
     <header class="topbar">
-      <div class="logo" onclick="location.hash='#/dashboard'">🎴 FlashDeck</div>
+      <div class="logo" onclick="location.hash='#/dashboard'">🎴 SlopStudy</div>
       <nav>
         ${navLink("dashboard", "nav_dashboard", "🏠")}
         ${navLink("new", "nav_new", "✨")}
         ${navLink("leaderboard", "nav_leaderboard", "🏆")}
+        ${u.is_admin ? navLink("admin", "nav_admin", "🛡️") : ""}
         ${navLink("settings", "nav_settings", "⚙️")}
       </nav>
       <div class="statpills">
@@ -111,6 +112,7 @@ function shell(content) {
       ${navLink("dashboard", "nav_dashboard", "🏠")}
       ${navLink("new", "nav_new", "✨")}
       ${navLink("leaderboard", "nav_leaderboard", "🏆")}
+      ${u.is_admin ? navLink("admin", "nav_admin", "🛡️") : ""}
       ${navLink("settings", "nav_settings", "⚙️")}
     </nav>
   </div>`;
@@ -129,7 +131,7 @@ function renderAuth() {
   $("#app").innerHTML = `
   <div class="auth-wrap">
     <div class="auth-hero">
-      <div class="logo">🎴 FlashDeck</div>
+      <div class="logo">🎴 SlopStudy</div>
       <p class="dim">${t("tagline")}</p>
     </div>
     <div class="card">
@@ -361,6 +363,9 @@ function renderFileChips() {
 
 async function renderTopic(id) {
   const topic = await api("/topics/" + id);
+  if (topic.status === "ready" || topic.status === "stopped") {
+    topic.revisions = await api(`/topics/${id}/revisions`).catch(() => []);
+  }
   state.topic = topic;
   let planHtml = "";
   if (topic.plan) {
@@ -450,8 +455,31 @@ async function renderTopic(id) {
     }
   }
 
-  const enriching = topic.status === "ready" && (topic.progress_msg || "").startsWith("enriching")
-    ? `<p class="small dim">🔎 ${t("enriching_note")}</p>` : "";
+  const pm = topic.progress_msg || "";
+  const enriching = topic.status === "ready" && pm.startsWith("enriching")
+    ? `<p class="small dim">🔎 ${t("enriching_note")}</p>`
+    : topic.status === "ready" && pm.startsWith("translating")
+    ? `<p class="small dim">🌐 ${t("translating_note")}</p>` : "";
+
+  let reviseHtml = "";
+  if (topic.status === "ready" || topic.status === "stopped") {
+    const revs = topic.revisions || [];
+    reviseHtml = `<div class="card">
+      <h2>✏️ ${t("revise_title")}</h2>
+      <p class="small dim">${t("revise_hint")}</p>
+      <form id="revise-form" data-topic="${topic.id}">
+        <textarea name="instruction" rows="2" required minlength="3" maxlength="1000"
+          placeholder="${esc(t("revise_ph"))}"></textarea>
+        <button class="btn primary" type="submit" style="margin-top:10px">✨ ${t("revise_submit")}</button>
+      </form>
+      ${revs.length ? `<h3 style="margin-top:16px">${t("revise_history")}</h3>
+        ${revs.map((r) => `<div class="row spread" style="border-top:1px solid var(--border);padding:8px 0">
+          <span class="small">${esc(r.instruction)}</span>
+          <span class="badge ${r.status === "done" ? "ready" : r.status === "failed" ? "failed" : "processing"}"
+            title="${esc(r.result_msg || "")}">${t("rev_status_" + r.status)}</span>
+        </div>`).join("")}` : ""}
+    </div>`;
+  }
 
   const sources = topic.sources.length
     ? `<div class="card"><h2>🔗 ${t("sources")}</h2>
@@ -463,7 +491,27 @@ async function renderTopic(id) {
       <h1>${esc(topic.title)} <span class="badge mode">${t("mode_" + topic.mode)}</span></h1>
       ${topic.status === "ready" ? `<button class="btn sm danger right" onclick="FD.deleteTopic(${topic.id})">${t("delete")}</button>` : ""}
     </div>
-    ${enriching}${actionHtml}${materialHtml}${planHtml}${sources}`);
+    ${enriching}${actionHtml}${reviseHtml}${materialHtml}${planHtml}${sources}`);
+
+  const revForm = $("#revise-form");
+  if (revForm) {
+    revForm.onsubmit = async (e) => {
+      e.preventDefault();
+      const instruction = e.target.instruction.value.trim();
+      try {
+        await api(`/topics/${id}/revise`, { json: { instruction } });
+        toast(t("revise_queued"), "success");
+        renderTopic(id).catch(() => {});
+      } catch (err) { apiError(err); }
+    };
+  }
+  // Refresh while a revision is being applied or background enrichment/translation runs.
+  const revBusy = (topic.revisions || []).some((r) => r.status === "queued" || r.status === "processing");
+  if (revBusy || pm.startsWith("enriching") || pm.startsWith("translating")) {
+    setTimeout(() => {
+      if (location.hash === "#/topic/" + id) renderTopic(id).catch(() => {});
+    }, 6000);
+  }
 }
 
 /* ---------------- study session ---------------- */
@@ -800,6 +848,84 @@ async function renderLeaderboard() {
   </div>`);
 }
 
+/* ---------------- admin ---------------- */
+
+async function renderAdmin() {
+  const [topics, users] = await Promise.all([api("/admin/topics"), api("/admin/users")]);
+  state.adminTopics = topics;
+
+  // Generation queue: anything still queued or processing, in processing order.
+  const queue = topics.filter((tp) => tp.status === "queued" || tp.status === "processing");
+  const queueHtml = queue.length ? queue.map((tp, i) => `
+    <div class="row spread" style="border-top:1px solid var(--border);padding:10px 0">
+      <div>
+        <b>${esc(tp.title)}</b> <span class="badge ${tp.status}">${t("status_" + tp.status)}</span>
+        ${tp.paused ? `<span class="badge queued">${t("admin_paused")}</span>` : ""}
+        <div class="small dim">${t("admin_owner")}: ${esc(tp.owner)}</div>
+      </div>
+      <div class="row">
+        ${tp.status === "queued" ? `
+          <button class="btn sm ghost" ${i === 0 ? "disabled" : ""} title="${t("admin_move_up")}"
+            onclick="FD.queueMove(${tp.id}, -1)">▲</button>
+          <button class="btn sm ghost" ${i === queue.length - 1 ? "disabled" : ""} title="${t("admin_move_down")}"
+            onclick="FD.queueMove(${tp.id}, 1)">▼</button>
+          ${tp.paused
+            ? `<button class="btn sm" onclick="FD.adminTopic(${tp.id},'resume')">▶ ${t("admin_resume")}</button>`
+            : `<button class="btn sm" onclick="FD.adminTopic(${tp.id},'pause')">⏸ ${t("admin_pause")}</button>`}` : ""}
+        <button class="btn sm danger" onclick="FD.adminStop(${tp.id})">⏹ ${t("admin_stop")}</button>
+      </div>
+    </div>`).join("") : `<p class="dim small">${t("admin_queue_empty")}</p>`;
+
+  const topicsHtml = topics.map((tp) => `
+    <tr>
+      <td><a href="#/topic/${tp.id}">${esc(tp.title)}</a></td>
+      <td class="small">${esc(tp.owner)}</td>
+      <td><span class="badge ${tp.status}">${t("status_" + tp.status)}</span></td>
+      <td class="small">${tp.card_count} ${t("cards")}</td>
+      <td><button class="btn sm danger" onclick="FD.adminDelete(${tp.id})">${t("delete")}</button></td>
+    </tr>`).join("");
+
+  const usersHtml = users.map((us) => `
+    <tr>
+      <td>${esc(us.name)}${us.id === state.user.id ? ` <span class="dim">(${t("admin_you")})</span>` : ""}
+        ${us.is_admin ? "🛡️" : ""}</td>
+      <td class="small">${esc(us.email)}</td>
+      <td class="small">${us.topics} ${t("admin_topics_count")}</td>
+      <td>${us.id === state.user.id ? "" : (us.is_admin
+        ? `<button class="btn sm ghost" onclick="FD.setAdmin(${us.id},false)">${t("admin_revoke_admin")}</button>`
+        : `<button class="btn sm" onclick="FD.setAdmin(${us.id},true)">${t("admin_make_admin")}</button>`)}</td>
+    </tr>`).join("");
+
+  $("#app").innerHTML = shell(`
+  <h1>🛡️ ${t("admin_title")}</h1>
+  <div class="card">
+    <h2>⏱️ ${t("admin_queue")}</h2>
+    ${queueHtml}
+  </div>
+  <div class="card">
+    <h2>👥 ${t("admin_users")}</h2>
+    <table class="lb">
+      <tr><th>${t("lb_user")}</th><th>${t("email")}</th><th></th><th></th></tr>
+      ${usersHtml}
+    </table>
+  </div>
+  <div class="card">
+    <h2>📚 ${t("admin_all_topics")}</h2>
+    <table class="lb">
+      <tr><th>${t("your_topics")}</th><th>${t("admin_owner")}</th><th></th><th></th><th></th></tr>
+      ${topicsHtml}
+    </table>
+  </div>`);
+
+  // Live-refresh while the queue is active.
+  if (queue.some((tp) => tp.status === "processing")) {
+    clearTimeout(state.pollTimer);
+    state.pollTimer = setTimeout(() => {
+      if ((location.hash.slice(2) || "").startsWith("admin")) renderAdmin().catch(() => {});
+    }, 4000);
+  }
+}
+
 /* ---------------- handlers (global) ---------------- */
 
 window.FD = {
@@ -821,6 +947,35 @@ window.FD = {
   },
   async retryTopic(id) {
     try { await api(`/topics/${id}/retry`, { method: "POST" }); route(); }
+    catch (err) { apiError(err); }
+  },
+  async adminTopic(id, action) {
+    try { await api(`/admin/topics/${id}/${action}`, { method: "POST" }); renderAdmin(); }
+    catch (err) { apiError(err); }
+  },
+  async adminStop(id) {
+    if (!confirm(t("confirm_stop"))) return;
+    try { await api(`/admin/topics/${id}/stop`, { method: "POST" }); renderAdmin(); }
+    catch (err) { apiError(err); }
+  },
+  async adminDelete(id) {
+    if (!confirm(t("confirm_delete_topic"))) return;
+    try { await api(`/topics/${id}`, { method: "DELETE" }); renderAdmin(); }
+    catch (err) { apiError(err); }
+  },
+  async setAdmin(id, on) {
+    try { await api(`/admin/users/${id}`, { method: "PUT", json: { is_admin: on } }); renderAdmin(); }
+    catch (err) { apiError(err); }
+  },
+  async queueMove(id, dir) {
+    // Reorder among currently-queued topics, then persist the new priority order.
+    const queued = (state.adminTopics || []).filter((tp) => tp.status === "queued");
+    const ids = queued.map((tp) => tp.id);
+    const i = ids.indexOf(id);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= ids.length) return;
+    [ids[i], ids[j]] = [ids[j], ids[i]];
+    try { await api("/admin/queue/reorder", { json: { order: ids } }); renderAdmin(); }
     catch (err) { apiError(err); }
   },
   async deleteTopic(id) {
@@ -904,10 +1059,15 @@ async function route() {
       case "study": renderStudy(); break;
       case "settings": renderSettings(); break;
       case "leaderboard": await renderLeaderboard(); break;
+      case "admin": await renderAdmin(); break;
       default: await renderDashboard();
     }
   } catch (err) {
-    if (err?.detail !== "not_authenticated") apiError(err);
+    if (err?.detail !== "not_authenticated") {
+      apiError(err);
+      // Never leave the user on a blank page (e.g. deep link to a foreign topic).
+      if (parts[0] !== "dashboard") { go("dashboard"); await renderDashboard().catch(() => {}); }
+    }
   }
 }
 
