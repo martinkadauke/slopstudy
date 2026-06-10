@@ -4,7 +4,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -456,6 +456,45 @@ async def finish_session(
     card_points = sum(sc.points_earned for sc in session_cards)
     points_this_session = card_points + participation_bonus + streak_bonus
     session.points_earned = points_this_session
+
+    # Badge awards — each awarded at most once per user
+    finished_count_result = await db.execute(
+        select(func.count())
+        .select_from(StudySession)
+        .where(
+            StudySession.user_id == current_user.id,
+            StudySession.finished_at.isnot(None),
+        )
+    )
+    finished_count = finished_count_result.scalar_one()
+
+    total_correct_result = await db.execute(
+        select(func.count())
+        .select_from(SessionCard)
+        .join(StudySession, SessionCard.session_id == StudySession.id)
+        .where(
+            StudySession.user_id == current_user.id,
+            SessionCard.is_correct == True,
+        )
+    )
+    cumulative_correct = total_correct_result.scalar_one()
+
+    current_badges: set[str] = set(current_user.badges or [])
+
+    def _award(key: str) -> None:
+        current_badges.add(key)
+
+    if finished_count == 1:
+        _award("first_session")
+    for threshold, badge_key in [(3, "streak_3"), (7, "streak_7"), (30, "streak_30")]:
+        if current_user.streak_days >= threshold:
+            _award(badge_key)
+    if cumulative_correct >= 100:
+        _award("century")
+    if cards_answered > 0 and cards_correct == cards_answered and cards_skipped == 0:
+        _award("perfect_session")
+
+    current_user.badges = list(current_badges)
 
     await db.commit()
 
