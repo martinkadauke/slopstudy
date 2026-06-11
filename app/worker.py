@@ -752,7 +752,8 @@ async def _maybe_refresh_topics() -> bool:
         )
         if not topic:
             return False
-        user = _ollama_actor(con, db.one(con, "SELECT * FROM users WHERE id=?", (topic["user_id"],)), task="generate")
+        # Nightly refresh + plan deepening use the dedicated 'refresh' model.
+        user = _ollama_actor(con, db.one(con, "SELECT * FROM users WHERE id=?", (topic["user_id"],)), task="refresh")
     key = f"refresh:{topic['id']}"
     plan = json.loads(topic["plan_json"])
     try:

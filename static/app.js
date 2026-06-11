@@ -439,12 +439,12 @@ function renderNew() {
         </select></label>
     </div>
 
-    <label class="field"><span>${t("visibility_label")}</span>
-      <select name="visibility" onchange="document.getElementById('vis-hint').textContent = this.value === 'private' ? FD._t('visibility_private_hint') : FD._t('visibility_public_hint')">
-        <option value="public">${t("visibility_public")}</option>
-        <option value="private">${t("visibility_private")}</option>
-      </select>
-      <small class="dim" id="vis-hint">${t("visibility_public_hint")}</small></label>
+    <label class="field" style="margin-bottom:6px"><span>${t("visibility_label")}</span></label>
+    <label class="switch" style="margin-bottom:4px">
+      <input type="checkbox" id="vis-public" checked
+        onchange="document.getElementById('vis-hint').textContent = this.checked ? FD._t('visibility_public_hint') : FD._t('visibility_private_hint')">
+      <span class="track"></span> 🌍 ${t("visibility_public")}</label>
+    <p class="small dim" id="vis-hint" style="margin:0 0 14px">${t("visibility_public_hint")}</p>
 
     <label class="field"><span>${t("sources_label")}</span></label>
     <div class="dropzone" id="dropzone">📄 ${t("upload_hint")}</div>
@@ -475,6 +475,7 @@ function renderNew() {
     btn.textContent = t("creating");
     const fd = new FormData(e.target);
     fd.set("mode", $("#mode-seg .opt.active").dataset.mode);
+    fd.set("visibility", $("#vis-public").checked ? "public" : "private");
     for (const f of state.newFiles) fd.append("files", f);
     try {
       const res = await api("/topics", { method: "POST", body: fd });
@@ -1191,7 +1192,7 @@ async function renderAdmin() {
 
     <h3 style="margin-top:18px">${t("model_per_task")}</h3>
     <p class="small dim">${t("model_per_task_hint")}</p>
-    ${["generate", "enrich", "translate", "report", "judge"].map((task) => {
+    ${["generate", "refresh", "enrich", "translate", "report", "judge"].map((task) => {
       const spec = (ollama.tasks && ollama.tasks[task]) || { provider: "", model: "" };
       return `<div class="row" style="align-items:flex-end">
         <label class="field" style="flex:2;min-width:180px;margin-bottom:8px"><span>${t("model_task_" + task)}</span>
@@ -1268,7 +1269,7 @@ async function renderAdmin() {
     e.preventDefault();
     const fd = new FormData(e.target);
     const tasks = {};
-    for (const task of ["generate", "enrich", "translate", "report", "judge"]) {
+    for (const task of ["generate", "refresh", "enrich", "translate", "report", "judge"]) {
       tasks[task] = { provider: fd.get("provider_" + task) || "", model: fd.get("model_" + task) || "" };
     }
     try {

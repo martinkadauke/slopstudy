@@ -242,7 +242,13 @@ DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 PROVIDERS = ("ollama", "deepseek")
 
 # AI task families that can each run on their own provider + model.
-OLLAMA_TASKS = ("generate", "enrich", "translate", "report", "judge")
+#   generate  — initial topic generation (plan + cards) and prompt-edit revisions
+#   refresh   — nightly fresh-question batches + mastery-driven plan deepening
+#   enrich    — deep explanations + learning material
+#   translate — card + content translation
+#   report    — nightly weakness reports
+#   judge     — semantic exact-answer grading
+OLLAMA_TASKS = ("generate", "refresh", "enrich", "translate", "report", "judge")
 LLM_TASKS = OLLAMA_TASKS
 
 
