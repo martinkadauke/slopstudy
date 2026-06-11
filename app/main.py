@@ -500,6 +500,20 @@ def get_topic(topic_id: int, user: dict = Depends(auth.current_user)):
         )
         out["ai"]["activity"] = topic["progress_msg"]
         out["ai"]["content_translated"] = bool(topic["content_translated"])
+        # Content translation progress: the plan counts as one step, plus one per
+        # learning-material unit — so the UI can show a bar like the other rows.
+        # Content is always translated into the OTHER language, regardless of viewer.
+        material_units = len(json.loads(topic["material_json"])) if topic["material_json"] else 0
+        target = llm.other_lang(topic["language"])
+        all_trans = json.loads(topic["translations_json"]) if topic["translations_json"] else {}
+        ctrans = all_trans.get(target) or {}
+        content_total = 1 + material_units  # the plan + each material unit
+        content_done = (1 if ctrans.get("plan", {}).get("units") else 0) + sum(
+            1 for m in (ctrans.get("material") or []) if m.get("text"))
+        if topic["content_translated"]:
+            content_done = content_total
+        out["ai"]["content_done"] = min(content_done, content_total)
+        out["ai"]["content_total"] = content_total
         out["plan"] = json.loads(topic["plan_json"]) if topic["plan_json"] else None
         out["material"] = json.loads(topic["material_json"]) if topic["material_json"] else []
         # Serve plan + learning material in the user's language when translated;
