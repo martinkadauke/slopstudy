@@ -105,6 +105,27 @@ def _parse_json(content: str) -> dict:
     raise OllamaError("The model did not return valid JSON. Try a larger/more capable model.")
 
 
+async def list_models(actor: dict) -> list[str]:
+    """Best-effort list of model names a provider offers (for autocomplete).
+    Returns [] on any error — the UI just falls back to free text."""
+    provider, base_url, api_key, _ = _norm(actor)
+    try:
+        async with httpx.AsyncClient(timeout=12) as client:
+            if provider == "deepseek":
+                if not api_key:
+                    return []
+                resp = await client.get(base_url + "/models",
+                                        headers={"Authorization": f"Bearer {api_key}"})
+                resp.raise_for_status()
+                return [m.get("id", "") for m in resp.json().get("data", []) if m.get("id")]
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            resp = await client.get(base_url + "/api/tags", headers=headers)
+            resp.raise_for_status()
+            return [m.get("name", "") for m in resp.json().get("models", []) if m.get("name")]
+    except Exception:
+        return []
+
+
 async def test_connection(actor: dict) -> dict:
     """Lightweight connectivity + model check for a provider (admin settings page)."""
     provider, base_url, api_key, model = _norm(actor)

@@ -1155,6 +1155,9 @@ async function renderAdmin() {
   $("#app").innerHTML = shell(`
   <h1>🛡️ ${t("admin_title")}</h1>
   <form class="card" id="ollama-form">
+    <datalist id="dl-ollama"></datalist>
+    <datalist id="dl-deepseek"></datalist>
+    <datalist id="dl-all"></datalist>
     <h2>🤖 ${t("ai_models")}</h2>
     <label class="field" style="max-width:280px"><span>${t("default_provider")}</span>
       <select name="default_provider">
@@ -1168,7 +1171,7 @@ async function renderAdmin() {
       <small class="dim">${t("ollama_url_hint")}</small></label>
     <div class="row">
       <label class="field" style="flex:1;min-width:180px"><span>${t("ollama_model")}</span>
-        <input type="text" name="ollama_model" value="${esc(ollama.ollama_model)}" required></label>
+        <input type="text" name="ollama_model" list="dl-ollama" autocomplete="off" value="${esc(ollama.ollama_model)}" required></label>
       <label class="field" style="flex:2;min-width:220px"><span>${t("ollama_key")}</span>
         <input type="password" name="ollama_api_key" placeholder="${ollama.ollama_api_key_set ? t("ollama_key_keep") : ""}"></label>
     </div>
@@ -1179,7 +1182,7 @@ async function renderAdmin() {
     <p class="small dim">${t("deepseek_hint")}</p>
     <div class="row">
       <label class="field" style="flex:1;min-width:180px"><span>${t("deepseek_model")}</span>
-        <input type="text" name="deepseek_model" value="${esc(ollama.deepseek_model || "")}" placeholder="deepseek-v4-flash"></label>
+        <input type="text" name="deepseek_model" list="dl-deepseek" autocomplete="off" value="${esc(ollama.deepseek_model || "")}" placeholder="deepseek-v4-flash"></label>
       <label class="field" style="flex:2;min-width:220px"><span>${t("deepseek_key")}</span>
         <input type="password" name="deepseek_api_key" placeholder="${ollama.deepseek_api_key_set ? t("ollama_key_keep") : "sk-…"}"></label>
     </div>
@@ -1192,13 +1195,15 @@ async function renderAdmin() {
       const spec = (ollama.tasks && ollama.tasks[task]) || { provider: "", model: "" };
       return `<div class="row" style="align-items:flex-end">
         <label class="field" style="flex:2;min-width:180px;margin-bottom:8px"><span>${t("model_task_" + task)}</span>
-          <select name="provider_${task}">
+          <select name="provider_${task}" onchange="FD.syncTaskList('${task}')">
             <option value="" ${!spec.provider ? "selected" : ""}>${t("provider_default")}</option>
             <option value="ollama" ${spec.provider === "ollama" ? "selected" : ""}>Ollama</option>
             <option value="deepseek" ${spec.provider === "deepseek" ? "selected" : ""}>DeepSeek</option>
           </select></label>
         <label class="field" style="flex:3;min-width:180px;margin-bottom:8px"><span>&nbsp;</span>
-          <input type="text" name="model_${task}" value="${esc(spec.model || "")}"
+          <input type="text" name="model_${task}" id="model_${task}" autocomplete="off"
+            list="${spec.provider === "ollama" ? "dl-ollama" : spec.provider === "deepseek" ? "dl-deepseek" : "dl-all"}"
+            value="${esc(spec.model || "")}"
             placeholder="${task === "judge" ? esc(t("model_judge_ph")) : esc(t("model_default_ph"))}"></label>
       </div>`;
     }).join("")}
@@ -1247,6 +1252,17 @@ async function renderAdmin() {
       renderAdmin();
     } catch (err) { apiError(err); }
   };
+
+  // Populate the model-picker datalists from each provider (best-effort, async).
+  api("/admin/models").then((m) => {
+    const fill = (id, models) => {
+      const dl = document.getElementById(id);
+      if (dl) dl.innerHTML = (models || []).map((x) => `<option value="${esc(x)}">`).join("");
+    };
+    fill("dl-ollama", m.ollama);
+    fill("dl-deepseek", m.deepseek);
+    fill("dl-all", [...(m.ollama || []), ...(m.deepseek || [])]);
+  }).catch(() => {});
 
   $("#ollama-form").onsubmit = async (e) => {
     e.preventDefault();
@@ -1541,6 +1557,13 @@ window.FD = {
   async setAdmin(id, on) {
     try { await api(`/admin/users/${id}`, { method: "PUT", json: { is_admin: on } }); renderAdmin(); }
     catch (err) { apiError(err); }
+  },
+  syncTaskList(task) {
+    const sel = document.querySelector(`[name=provider_${task}]`);
+    const inp = document.getElementById(`model_${task}`);
+    if (!sel || !inp) return;
+    inp.setAttribute("list", sel.value === "ollama" ? "dl-ollama"
+      : sel.value === "deepseek" ? "dl-deepseek" : "dl-all");
   },
   async testProvider(provider) {
     const out = $("#test-" + provider);

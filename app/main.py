@@ -372,6 +372,20 @@ def set_ollama(body: OllamaBody, admin: dict = Depends(auth.current_admin)):
     return {"ok": True}
 
 
+@app.get("/api/admin/models")
+async def admin_list_models(admin: dict = Depends(auth.current_admin)):
+    """Available models per provider, for the admin model-picker autocomplete."""
+    with db.connect() as con:
+        configs = {p: {"llm_provider": p,
+                       **dict(zip(("llm_base_url", "llm_api_key", "llm_model"),
+                                  db._provider_conn(con, p)))}
+                   for p in db.PROVIDERS}
+    out = {}
+    for prov, cfg in configs.items():
+        out[prov] = await llm.list_models(cfg)
+    return out
+
+
 @app.post("/api/admin/ollama/test")
 async def test_ollama(provider: str = "", admin: dict = Depends(auth.current_admin)):
     with db.connect() as con:
