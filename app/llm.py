@@ -111,20 +111,34 @@ async def test_connection(actor: dict) -> dict:
     if provider == "deepseek":
         if not api_key:
             raise OllamaError("DeepSeek API key is not configured.")
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        # List models for suggestions...
+        models = []
         try:
             async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(
-                    base_url + "/models",
-                    headers={"Authorization": f"Bearer {api_key}"})
+                lst = await client.get(base_url + "/models", headers=headers)
+            if lst.status_code == 401:
+                raise OllamaError("DeepSeek rejected the API key (401).")
+            if lst.status_code == 200:
+                models = [m.get("id", "") for m in lst.json().get("data", [])]
         except httpx.HTTPError as e:
             raise OllamaError(f"Cannot reach DeepSeek: {e}") from e
-        if resp.status_code == 401:
+        # ...then actually exercise the configured model (handles aliases like
+        # deepseek-chat that work but aren't listed verbatim).
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                chk = await client.post(
+                    base_url + "/chat/completions", headers=headers,
+                    json={"model": model, "messages": [{"role": "user", "content": "ping"}],
+                          "max_tokens": 1, "stream": False})
+        except httpx.HTTPError as e:
+            raise OllamaError(f"Cannot reach DeepSeek: {e}") from e
+        if chk.status_code == 401:
             raise OllamaError("DeepSeek rejected the API key (401).")
-        if resp.status_code != 200:
-            raise OllamaError(f"DeepSeek returned HTTP {resp.status_code}: {resp.text[:200]}")
-        models = [m.get("id", "") for m in resp.json().get("data", [])]
+        if chk.status_code == 402:
+            raise OllamaError("DeepSeek: insufficient balance (402).")
         return {"ok": True, "provider": "deepseek", "models": models,
-                "model_available": (model in models) if models else True}
+                "model_available": chk.status_code == 200}
     # ollama
     try:
         async with httpx.AsyncClient(timeout=15) as client:

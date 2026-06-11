@@ -1179,7 +1179,7 @@ async function renderAdmin() {
     <p class="small dim">${t("deepseek_hint")}</p>
     <div class="row">
       <label class="field" style="flex:1;min-width:180px"><span>${t("deepseek_model")}</span>
-        <input type="text" name="deepseek_model" value="${esc(ollama.deepseek_model || "")}" placeholder="deepseek-chat"></label>
+        <input type="text" name="deepseek_model" value="${esc(ollama.deepseek_model || "")}" placeholder="deepseek-v4-flash"></label>
       <label class="field" style="flex:2;min-width:220px"><span>${t("deepseek_key")}</span>
         <input type="password" name="deepseek_api_key" placeholder="${ollama.deepseek_api_key_set ? t("ollama_key_keep") : "sk-…"}"></label>
     </div>

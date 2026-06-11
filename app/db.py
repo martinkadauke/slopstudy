@@ -238,7 +238,7 @@ def now() -> int:
 DEFAULT_OLLAMA_URL = "http://host.docker.internal:11434"
 DEFAULT_OLLAMA_MODEL = "llama3.1"
 DEFAULT_DEEPSEEK_URL = "https://api.deepseek.com"
-DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 PROVIDERS = ("ollama", "deepseek")
 
 # AI task families that can each run on their own provider + model.
