@@ -158,6 +158,8 @@ MIGRATIONS = [
     ("topics", "nightly_refresh", "INTEGER NOT NULL DEFAULT 0"),
     ("topics", "last_refresh_at", "INTEGER NOT NULL DEFAULT 0"),
     ("topics", "queue_priority", "INTEGER NOT NULL DEFAULT 0"),
+    ("topics", "translations_json", "TEXT NOT NULL DEFAULT ''"),
+    ("topics", "content_translated", "INTEGER NOT NULL DEFAULT 0"),
     ("topics", "paused", "INTEGER NOT NULL DEFAULT 0"),
     ("topics", "cancel_requested", "INTEGER NOT NULL DEFAULT 0"),
     ("topics", "enrich_paused", "INTEGER NOT NULL DEFAULT 0"),

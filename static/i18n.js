@@ -253,7 +253,8 @@ window.I18N = {
 
     ai_status: "AI status",
     ai_explanations: "Deep explanations",
-    ai_translations: "Translations",
+    ai_translations: "Card translations",
+    ai_content: "Plan & material translated",
     ai_complete: "All AI work for this deck is done.",
     ai_paused_note: "Background AI work is currently paused.",
 
@@ -546,7 +547,8 @@ window.I18N = {
 
     ai_status: "KI-Status",
     ai_explanations: "Tiefe Erklärungen",
-    ai_translations: "Übersetzungen",
+    ai_translations: "Karten-Übersetzungen",
+    ai_content: "Plan & Material übersetzt",
     ai_complete: "Alle KI-Arbeit für diesen Stapel ist fertig.",
     ai_paused_note: "KI-Hintergrundarbeit ist gerade pausiert.",
 

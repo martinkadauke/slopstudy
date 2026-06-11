@@ -495,6 +495,53 @@ def other_lang(lang: str) -> str:
     return "en" if lang == "de" else "de"
 
 
+TRANSLATE_PLAN_SYSTEM = """You translate a study-plan JSON object into {target}. Keep the \
+structure and keys EXACTLY identical — translate only the string values (title, overview, and \
+each unit's title, objectives, key_concepts, pitfalls). Use the terminology a {target} textbook \
+would use; keep established technical terms, proper nouns and formulas intact. Do not add, \
+remove or reorder units or list items.
+
+Respond ONLY with the translated JSON object of identical shape."""
+
+
+async def translate_plan(user: dict, plan: dict, target_lang: str) -> dict:
+    """Translate the study plan (title/overview/units) into target_lang."""
+    target = LANG_NAMES.get(target_lang, "English")
+    data = await chat_json(
+        user,
+        TRANSLATE_PLAN_SYSTEM.format(target=target),
+        json.dumps(plan, ensure_ascii=False),
+    )
+    units = data.get("units")
+    if not isinstance(units, list) or len(units) != len(plan.get("units", [])):
+        raise OllamaError("Plan translation returned a different structure.")
+    return data
+
+
+TRANSLATE_MATERIAL_SYSTEM = """You translate one unit of study material into {target}. \
+Translate faithfully, the way a {target} textbook would phrase it; keep technical terms, \
+formulas and proper nouns intact. Preserve the paragraph breaks (\\n\\n).
+
+Respond ONLY with JSON: {{"title": "...", "text": "..."}}"""
+
+
+async def translate_material_unit(user: dict, entry: dict, target_lang: str) -> dict:
+    """Translate one learning-material unit (title + text); sources stay as-is."""
+    target = LANG_NAMES.get(target_lang, "English")
+    data = await chat_json(
+        user,
+        TRANSLATE_MATERIAL_SYSTEM.format(target=target),
+        json.dumps({"title": entry.get("title", ""), "text": entry.get("text", "")},
+                   ensure_ascii=False),
+    )
+    title = str(data.get("title", "")).strip()
+    text = str(data.get("text", "")).strip()
+    if not text:
+        raise OllamaError("Material translation returned no text.")
+    return {"title": title or entry.get("title", ""), "text": text,
+            "sources": entry.get("sources", [])}
+
+
 # ------------------------------------------------ weakness report (nightly email)
 
 REPORT_SYSTEM = """You are a supportive but rigorous study coach writing a personal review \

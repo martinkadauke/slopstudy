@@ -353,6 +353,7 @@ async def _enrich_step() -> bool:
                  OR EXISTS (SELECT 1 FROM cards c WHERE c.topic_id=t.id AND c.sources_json='')
                  OR EXISTS (SELECT 1 FROM cards c WHERE c.topic_id=t.id
                             AND c.sources_json != '' AND c.translations_json='')
+                 OR t.content_translated = 0
                ) ORDER BY COALESCE(t.ready_at, 0) DESC, t.id DESC LIMIT 1""",
         )
         if not topic:
@@ -451,37 +452,109 @@ async def _enrich_step() -> bool:
             """SELECT COUNT(*) AS c FROM cards WHERE topic_id=? AND sources_json != ''
                AND translations_json=''""",
             (topic["id"],))["c"]
-    if not cards:
-        _update(topic["id"], progress_msg="")
-        return True
-    _update(topic["id"], progress_msg=f"translating_cards:{remaining}")
-    for card in cards:
-        key = f"trans:{card['id']}"
-        base_lang = card["lang"] or topic["language"]
-        target = llm.other_lang(base_lang)
-        try:
-            translated = await _await_or_pause(
-                llm.translate_card(translate_user, card, target), topic["id"])
-            with db.connect() as con:
-                con.execute(
-                    "UPDATE cards SET translations_json=? WHERE id=?",
-                    (json.dumps({target: translated}, ensure_ascii=False), card["id"]),
-                )
-            _fail_counts.pop(key, None)
-        except _Paused:
-            return True  # leave this card untranslated; resume re-does it
-        except Exception as e:
-            log.warning("Translating card %s failed: %s", card["id"], e)
-            if _record_failure(key):
-                # Mark as attempted so we stop retrying; UI falls back to base language.
+    if cards:
+        _update(topic["id"], progress_msg=f"translating_cards:{remaining}")
+        for card in cards:
+            key = f"trans:{card['id']}"
+            base_lang = card["lang"] or topic["language"]
+            target = llm.other_lang(base_lang)
+            try:
+                translated = await _await_or_pause(
+                    llm.translate_card(translate_user, card, target), topic["id"])
                 with db.connect() as con:
-                    con.execute("UPDATE cards SET translations_json='{}' WHERE id=?", (card["id"],))
-            else:
-                await asyncio.sleep(POLL_INTERVAL)
+                    con.execute(
+                        "UPDATE cards SET translations_json=? WHERE id=?",
+                        (json.dumps({target: translated}, ensure_ascii=False), card["id"]),
+                    )
+                _fail_counts.pop(key, None)
+            except _Paused:
+                return True  # leave this card untranslated; resume re-does it
+            except Exception as e:
+                log.warning("Translating card %s failed: %s", card["id"], e)
+                if _record_failure(key):
+                    # Mark as attempted so we stop retrying; UI falls back to base language.
+                    with db.connect() as con:
+                        con.execute("UPDATE cards SET translations_json='{}' WHERE id=?",
+                                    (card["id"],))
+                else:
+                    await asyncio.sleep(POLL_INTERVAL)
+                    return True
+        if remaining <= len(cards):
+            log.info("Card translation for topic %s complete", topic["id"])
+        return True
+
+    # Phase 4: translate topic-level content — title, study plan, learning
+    # material — so the whole topic page follows the user's language toggle.
+    if not topic["content_translated"]:
+        target = llm.other_lang(topic["language"])
+        trans = json.loads(topic["translations_json"]) if topic["translations_json"] else {}
+        entry = trans.get(target) or {}
+
+        def _save(done: bool):
+            trans[target] = entry
+            fields = {"translations_json": json.dumps(trans, ensure_ascii=False),
+                      "content_translated": 1 if done else 0}
+            if done:
+                fields["progress_msg"] = ""
+            _update(topic["id"], **fields)
+
+        if "plan" not in entry:
+            _update(topic["id"], progress_msg="translating_content:plan")
+            key = f"cplan:{topic['id']}"
+            try:
+                translated_plan = await _await_or_pause(
+                    llm.translate_plan(translate_user, plan, target), topic["id"])
+                entry["plan"] = translated_plan
+                entry["title"] = str(translated_plan.get("title", ""))[:120]
+                _fail_counts.pop(key, None)
+            except _Paused:
                 return True
-    if remaining <= len(cards):
-        _update(topic["id"], progress_msg="")
-        log.info("Translation for topic %s complete", topic["id"])
+            except Exception as e:
+                log.warning("Plan translation for topic %s failed: %s", topic["id"], e)
+                if _record_failure(key):
+                    entry["plan"] = {}  # attempted; UI falls back to base language
+                else:
+                    await asyncio.sleep(POLL_INTERVAL)
+                    return True
+            _save(done=False)
+            return True
+
+        mat_t = entry.get("material") or []
+        if len(mat_t) < len(material):
+            idx = len(mat_t)
+            source_entry = material[idx]
+            _update(topic["id"],
+                    progress_msg=f"translating_content:{idx + 1}/{len(material)}")
+            if not source_entry.get("text"):
+                mat_t.append({})  # failed/empty unit: keep indexes aligned
+            else:
+                key = f"cmat:{topic['id']}:{idx}"
+                try:
+                    mat_t.append(await _await_or_pause(
+                        llm.translate_material_unit(translate_user, source_entry, target),
+                        topic["id"]))
+                    _fail_counts.pop(key, None)
+                except _Paused:
+                    return True
+                except Exception as e:
+                    log.warning("Material translation %s/%s failed: %s", topic["id"], idx, e)
+                    if _record_failure(key):
+                        mat_t.append({})
+                    else:
+                        await asyncio.sleep(POLL_INTERVAL)
+                        return True
+            entry["material"] = mat_t
+            done = len(mat_t) >= len(material)
+            _save(done=done)
+            if done:
+                log.info("Content translation for topic %s complete", topic["id"])
+            return True
+
+        _save(done=True)
+        log.info("Content translation for topic %s complete", topic["id"])
+        return True
+
+    _update(topic["id"], progress_msg="")
     return True
 
 

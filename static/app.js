@@ -604,7 +604,7 @@ async function renderTopic(id) {
   let aiHtml = "";
   if (topic.status === "ready" && topic.ai && topic.ai.total > 0) {
     const ai = topic.ai;
-    const allDone = ai.enriched >= ai.total && ai.translated >= ai.total;
+    const allDone = ai.enriched >= ai.total && ai.translated >= ai.total && ai.content_translated;
     const bar = (label, done, total) => `
       <div class="row spread" style="margin-top:8px">
         <span class="small">${label}</span><span class="small dim">${done}/${total}</span>
@@ -615,6 +615,10 @@ async function renderTopic(id) {
       ${allDone ? `<p class="small dim" style="margin-bottom:0">✅ ${t("ai_complete")}</p>` : `
         ${bar("📚 " + t("ai_explanations"), ai.enriched, ai.total)}
         ${bar("🌐 " + t("ai_translations"), ai.translated, ai.total)}
+        <div class="row spread" style="margin-top:8px">
+          <span class="small">📋 ${t("ai_content")}</span>
+          <span class="small dim">${ai.content_translated ? "✓" : "⏳"}</span>
+        </div>
         ${pm.startsWith("enriching") || pm.startsWith("translating")
           ? `<p class="small dim" style="margin:10px 0 0">⚙️ ${pm.startsWith("translating") ? t("translating_note") : t("enriching_note")}</p>` : ""}`}
     </div>`;

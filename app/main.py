@@ -406,11 +406,21 @@ async def create_topic(
     return {"ok": True, "topic_id": topic_id}
 
 
-def _topic_summary(con, topic: dict) -> dict:
+def _topic_translation(topic: dict, want_lang: str) -> dict:
+    """The stored translation bundle for want_lang, or {} when not applicable."""
+    if want_lang == topic["language"] or not topic.get("translations_json"):
+        return {}
+    return (json.loads(topic["translations_json"]) or {}).get(want_lang) or {}
+
+
+def _topic_summary(con, topic: dict, want_lang: str | None = None) -> dict:
     cards = db.one(con, "SELECT COUNT(*) AS c FROM cards WHERE topic_id=?", (topic["id"],))["c"]
     plan = json.loads(topic["plan_json"]) if topic["plan_json"] else None
+    title = topic["title"] or topic["prompt"][:60]
+    if want_lang:
+        title = _topic_translation(topic, want_lang).get("title") or title
     return {
-        "id": topic["id"], "title": topic["title"] or topic["prompt"][:60],
+        "id": topic["id"], "title": title,
         "prompt": topic["prompt"], "mode": topic["mode"], "language": topic["language"],
         "status": topic["status"], "progress_msg": topic["progress_msg"],
         "progress_pct": topic["progress_pct"], "error": topic["error"],
@@ -434,7 +444,7 @@ def list_topics(user: dict = Depends(auth.current_user)):
         )
         out = []
         for topic in topics:
-            summary = _topic_summary(con, topic)
+            summary = _topic_summary(con, topic, want_lang=user["language"])
             summary["shared"] = topic["user_id"] != user["id"]
             summary["owner_name"] = topic["owner_name"]
             if topic["status"] == "ready":
@@ -475,7 +485,7 @@ def _accessible_topic(con, topic_id: int, user: dict) -> tuple[dict, bool]:
 def get_topic(topic_id: int, user: dict = Depends(auth.current_user)):
     with db.connect() as con:
         topic, is_owner = _accessible_topic(con, topic_id, user)
-        out = _topic_summary(con, topic)
+        out = _topic_summary(con, topic, want_lang=user["language"])
         out["is_owner"] = is_owner
         owner = db.one(con, "SELECT name FROM users WHERE id=?", (topic["user_id"],))
         out["owner_name"] = owner["name"] if owner else "?"
@@ -489,8 +499,20 @@ def get_topic(topic_id: int, user: dict = Depends(auth.current_user)):
             (topic_id,),
         )
         out["ai"]["activity"] = topic["progress_msg"]
+        out["ai"]["content_translated"] = bool(topic["content_translated"])
         out["plan"] = json.loads(topic["plan_json"]) if topic["plan_json"] else None
         out["material"] = json.loads(topic["material_json"]) if topic["material_json"] else []
+        # Serve plan + learning material in the user's language when translated;
+        # untranslated parts fall back to the topic's original language.
+        trans = _topic_translation(topic, user["language"])
+        if trans.get("plan") and trans["plan"].get("units"):
+            out["plan"] = trans["plan"]
+        mat_t = trans.get("material") or []
+        if out["material"] and mat_t:
+            out["material"] = [
+                mat_t[i] if i < len(mat_t) and mat_t[i].get("text") else orig
+                for i, orig in enumerate(out["material"])
+            ]
         out["sources"] = [
             {"kind": s["kind"], "name": s["name"]}
             for s in db.all_rows(con, "SELECT * FROM sources WHERE topic_id=?", (topic_id,))
