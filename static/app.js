@@ -1155,7 +1155,14 @@ async function renderAdmin() {
   $("#app").innerHTML = shell(`
   <h1>🛡️ ${t("admin_title")}</h1>
   <form class="card" id="ollama-form">
-    <h2>🦙 ${t("ollama")}</h2>
+    <h2>🤖 ${t("ai_models")}</h2>
+    <label class="field" style="max-width:280px"><span>${t("default_provider")}</span>
+      <select name="default_provider">
+        <option value="ollama" ${ollama.default_provider === "ollama" ? "selected" : ""}>Ollama (local)</option>
+        <option value="deepseek" ${ollama.default_provider === "deepseek" ? "selected" : ""}>DeepSeek (cloud)</option>
+      </select></label>
+
+    <h3 style="margin-top:14px">🦙 ${t("ollama")}</h3>
     <label class="field"><span>${t("ollama_url")}</span>
       <input type="text" name="ollama_url" value="${esc(ollama.ollama_url)}" required>
       <small class="dim">${t("ollama_url_hint")}</small></label>
@@ -1165,19 +1172,39 @@ async function renderAdmin() {
       <label class="field" style="flex:2;min-width:220px"><span>${t("ollama_key")}</span>
         <input type="password" name="ollama_api_key" placeholder="${ollama.ollama_api_key_set ? t("ollama_key_keep") : ""}"></label>
     </div>
-    <h3 style="margin-top:14px">${t("model_per_task")}</h3>
-    <p class="small dim">${t("model_per_task_hint")}</p>
+    <button class="btn ghost sm" type="button" onclick="FD.testProvider('ollama')">🔌 ${t("test_ollama")}</button>
+    <span class="small" id="test-ollama" style="margin-left:8px"></span>
+
+    <h3 style="margin-top:18px">🌊 DeepSeek</h3>
+    <p class="small dim">${t("deepseek_hint")}</p>
     <div class="row">
-      ${["generate", "enrich", "translate", "report", "judge"].map((task) => `
-        <label class="field" style="flex:1;min-width:200px"><span>${t("model_task_" + task)}</span>
-          <input type="text" name="model_${task}" value="${esc(ollama.task_models[task] || "")}"
-            placeholder="${task === "judge" ? esc(t("model_judge_ph")) : esc(t("model_default_ph"))}"></label>`).join("")}
+      <label class="field" style="flex:1;min-width:180px"><span>${t("deepseek_model")}</span>
+        <input type="text" name="deepseek_model" value="${esc(ollama.deepseek_model || "")}" placeholder="deepseek-chat"></label>
+      <label class="field" style="flex:2;min-width:220px"><span>${t("deepseek_key")}</span>
+        <input type="password" name="deepseek_api_key" placeholder="${ollama.deepseek_api_key_set ? t("ollama_key_keep") : "sk-…"}"></label>
     </div>
+    <button class="btn ghost sm" type="button" onclick="FD.testProvider('deepseek')">🔌 ${t("test_deepseek")}</button>
+    <span class="small" id="test-deepseek" style="margin-left:8px"></span>
+
+    <h3 style="margin-top:18px">${t("model_per_task")}</h3>
+    <p class="small dim">${t("model_per_task_hint")}</p>
+    ${["generate", "enrich", "translate", "report", "judge"].map((task) => {
+      const spec = (ollama.tasks && ollama.tasks[task]) || { provider: "", model: "" };
+      return `<div class="row" style="align-items:flex-end">
+        <label class="field" style="flex:2;min-width:180px;margin-bottom:8px"><span>${t("model_task_" + task)}</span>
+          <select name="provider_${task}">
+            <option value="" ${!spec.provider ? "selected" : ""}>${t("provider_default")}</option>
+            <option value="ollama" ${spec.provider === "ollama" ? "selected" : ""}>Ollama</option>
+            <option value="deepseek" ${spec.provider === "deepseek" ? "selected" : ""}>DeepSeek</option>
+          </select></label>
+        <label class="field" style="flex:3;min-width:180px;margin-bottom:8px"><span>&nbsp;</span>
+          <input type="text" name="model_${task}" value="${esc(spec.model || "")}"
+            placeholder="${task === "judge" ? esc(t("model_judge_ph")) : esc(t("model_default_ph"))}"></label>
+      </div>`;
+    }).join("")}
     <div class="row">
       <button class="btn primary" type="submit">${t("save")}</button>
-      <button class="btn ghost" type="button" id="test-btn">🔌 ${t("test_connection")}</button>
     </div>
-    <p class="small" id="test-result" style="margin-bottom:0"></p>
   </form>
   <div class="card">
     <div class="row spread">
@@ -1224,41 +1251,21 @@ async function renderAdmin() {
   $("#ollama-form").onsubmit = async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
+    const tasks = {};
+    for (const task of ["generate", "enrich", "translate", "report", "judge"]) {
+      tasks[task] = { provider: fd.get("provider_" + task) || "", model: fd.get("model_" + task) || "" };
+    }
     try {
       await api("/admin/ollama", { method: "PUT", json: {
+        default_provider: fd.get("default_provider"),
         ollama_url: fd.get("ollama_url"), ollama_model: fd.get("ollama_model"),
         ollama_api_key: fd.get("ollama_api_key") || null,
-        task_models: {
-          generate: fd.get("model_generate") || "",
-          enrich: fd.get("model_enrich") || "",
-          translate: fd.get("model_translate") || "",
-          report: fd.get("model_report") || "",
-          judge: fd.get("model_judge") || "",
-        },
+        deepseek_model: fd.get("deepseek_model") || "",
+        deepseek_api_key: fd.get("deepseek_api_key") || null,
+        tasks,
       }});
       toast(t("saved"), "success");
     } catch (err) { apiError(err); }
-  };
-  $("#test-btn").onclick = async () => {
-    const out = $("#test-result");
-    out.textContent = t("testing");
-    out.style.color = "";
-    const model = $("#ollama-form [name=ollama_model]").value;
-    try {
-      const res = await api("/admin/ollama/test", { method: "POST" });
-      if (res.ok) {
-        out.style.color = res.model_available ? "var(--ok)" : "var(--warn)";
-        out.textContent = res.model_available
-          ? t("conn_ok", model)
-          : t("conn_ok_no_model", model, res.models.join(", ") || "—");
-      } else {
-        out.style.color = "var(--bad)";
-        out.textContent = res.error;
-      }
-    } catch (err) {
-      out.style.color = "var(--bad)";
-      out.textContent = err.error || t("err_generic", err.detail || "");
-    }
   };
 
   // Live-refresh while the queue OR background AI work is active.
@@ -1534,6 +1541,25 @@ window.FD = {
   async setAdmin(id, on) {
     try { await api(`/admin/users/${id}`, { method: "PUT", json: { is_admin: on } }); renderAdmin(); }
     catch (err) { apiError(err); }
+  },
+  async testProvider(provider) {
+    const out = $("#test-" + provider);
+    if (!out) return;
+    out.textContent = t("testing"); out.style.color = "";
+    const modelField = provider === "deepseek" ? "deepseek_model" : "ollama_model";
+    const model = $(`#ollama-form [name=${modelField}]`)?.value || "";
+    try {
+      const res = await api("/admin/ollama/test?provider=" + provider, { method: "POST" });
+      if (res.ok) {
+        out.style.color = res.model_available ? "var(--ok)" : "var(--warn)";
+        out.textContent = res.model_available
+          ? t("conn_ok", model)
+          : t("conn_ok_no_model", model, (res.models || []).slice(0, 6).join(", ") || "—");
+      } else { out.style.color = "var(--bad)"; out.textContent = res.error; }
+    } catch (err) {
+      out.style.color = "var(--bad)";
+      out.textContent = err.error || t("err_generic", err.detail || "");
+    }
   },
   async bgPauseAll(on) {
     try { await api("/admin/background", { json: { paused: on } }); renderAdmin(); }

@@ -208,6 +208,11 @@ def init():
             if col not in existing:
                 con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
         _seed_ollama_settings(con)
+        # Migrate pre-multi-provider per-task model keys to the new generic names.
+        for task in LLM_TASKS:
+            legacy = get_setting(con, f"ollama_model_{task}", "")
+            if legacy and not get_setting(con, f"task_model_{task}", ""):
+                set_setting(con, f"task_model_{task}", legacy)
 
 
 @contextmanager
@@ -232,24 +237,46 @@ def now() -> int:
 
 DEFAULT_OLLAMA_URL = "http://host.docker.internal:11434"
 DEFAULT_OLLAMA_MODEL = "llama3.1"
+DEFAULT_DEEPSEEK_URL = "https://api.deepseek.com"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
+PROVIDERS = ("ollama", "deepseek")
 
-
-# AI task families that can each run on their own (e.g. smaller/faster) model.
+# AI task families that can each run on their own provider + model.
 OLLAMA_TASKS = ("generate", "enrich", "translate", "report", "judge")
+LLM_TASKS = OLLAMA_TASKS
 
 
+def _provider_conn(con, provider: str) -> tuple[str, str, str]:
+    """(base_url, api_key, default_model) for a provider."""
+    if provider == "deepseek":
+        return (get_setting(con, "deepseek_url", DEFAULT_DEEPSEEK_URL).rstrip("/"),
+                get_setting(con, "deepseek_api_key", ""),
+                get_setting(con, "deepseek_model", DEFAULT_DEEPSEEK_MODEL))
+    return (get_setting(con, "ollama_url", DEFAULT_OLLAMA_URL).rstrip("/"),
+            get_setting(con, "ollama_api_key", ""),
+            get_setting(con, "ollama_model", DEFAULT_OLLAMA_MODEL))
+
+
+def model_config(con, task: str | None = None) -> dict:
+    """Resolve the provider + model + connection for a task (provider-agnostic).
+
+    Per task an admin may override the provider and/or the model; otherwise the
+    global default provider and that provider's default model are used.
+    """
+    default_provider = get_setting(con, "default_provider", "ollama") or "ollama"
+    provider = (get_setting(con, f"task_provider_{task}", "") if task else "") or default_provider
+    if provider not in PROVIDERS:
+        provider = "ollama"
+    base_url, api_key, default_model = _provider_conn(con, provider)
+    model = get_setting(con, f"task_model_{task}", "") if task else ""
+    model = model or default_model
+    return {"llm_provider": provider, "llm_base_url": base_url,
+            "llm_api_key": api_key, "llm_model": model}
+
+
+# Back-compat: some call sites still reference ollama_config.
 def ollama_config(con, task: str | None = None) -> dict:
-    """The admin-managed Ollama connection; per-task model override if configured."""
-    cfg = {
-        "ollama_url": get_setting(con, "ollama_url", DEFAULT_OLLAMA_URL),
-        "ollama_model": get_setting(con, "ollama_model", DEFAULT_OLLAMA_MODEL),
-        "ollama_api_key": get_setting(con, "ollama_api_key", ""),
-    }
-    if task in OLLAMA_TASKS:
-        override = get_setting(con, f"ollama_model_{task}", "")
-        if override:
-            cfg["ollama_model"] = override
-    return cfg
+    return model_config(con, task)
 
 
 def _seed_ollama_settings(con):

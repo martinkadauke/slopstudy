@@ -664,6 +664,71 @@ REFRESH_BATCH = 8
 # originally requested size — otherwise decks inflate by 8 cards forever.
 REFRESH_CAP_FACTOR = 3
 
+# Mastery-driven plan deepening: when a learner has answered a card correctly in
+# at least this many separate rounds (streak), it counts as "mastered". Once a
+# learner masters this fraction of a deck's cards, the nightly job extends the
+# study plan with deeper/neighbouring units instead of just drilling weak spots.
+MASTERY_STREAK = 2
+DEEPEN_THRESHOLD = 0.75
+MAX_PLAN_UNITS = 12
+
+
+def _top_mastery(con, topic_id: int, total_cards: int):
+    """Return (user_id, fraction_mastered) for the strongest learner on a topic."""
+    if not total_cards:
+        return None, 0.0
+    row = db.one(
+        con,
+        """SELECT p.user_id, COUNT(*) AS mastered
+           FROM card_progress p JOIN cards c ON c.id = p.card_id
+           WHERE c.topic_id = ? AND p.streak >= ?
+           GROUP BY p.user_id ORDER BY mastered DESC LIMIT 1""",
+        (topic_id, MASTERY_STREAK),
+    )
+    if not row:
+        return None, 0.0
+    return row["user_id"], row["mastered"] / total_cards
+
+
+async def _deepen_plan(topic: dict, plan: dict, actor: dict, trigger_user_id: int,
+                       all_questions: list[str], srcs: list[dict]) -> bool:
+    """Append 1 deeper/neighbouring unit to a mastered plan and generate its cards.
+
+    Adding a unit dilutes the mastery fraction, so the trigger won't re-fire until
+    the learner masters the larger plan too — naturally self-limiting, bounded by
+    MAX_PLAN_UNITS.
+    """
+    new_units = await llm.deepen_plan(actor, topic, plan, n_new=1)
+    base = len(plan["units"])
+    plan["units"].extend(new_units)
+    with db.connect() as con:
+        # Persist the expanded plan and force content re-translation (new units +
+        # their learning material need translating); material auto-generates via
+        # the enrichment pipeline since plan now has more units than material.
+        con.execute("UPDATE topics SET plan_json=?, content_translated=0 WHERE id=?",
+                    (json.dumps(plan, ensure_ascii=False), topic["id"]))
+    total_new = 0
+    for offset in range(len(new_units)):
+        idx = base + offset
+        cards = await llm.generate_unit_cards(
+            actor, topic, plan, idx, llm.cards_per_unit(topic["card_count"], base or 1),
+            extract.combine_sources(srcs), avoid_questions=all_questions[-60:])
+        with db.connect() as con:
+            for card in cards:
+                _insert_card(con, topic["id"], idx, topic["language"], card)
+        total_new += len(cards)
+    with db.connect() as con:
+        con.execute("UPDATE topics SET last_refresh_at=? WHERE id=?", (db.now(), topic["id"]))
+        learner = db.one(con, "SELECT * FROM users WHERE id=?", (trigger_user_id,))
+    log.info("Deepened topic %s: +%s unit(s), +%s cards", topic["id"], len(new_units), total_new)
+    if learner and learner["email_notifications"] and not learner["disabled"]:
+        emailer.send_notice_sync(
+            learner["email"], learner["language"], "plan_deepened",
+            link_path=f"/#/topic/{topic['id']}", name=learner["name"],
+            title=topic["title"] or topic["prompt"][:60],
+            unit=new_units[0].get("title", ""))
+    return True
+
 
 async def _maybe_refresh_topics() -> bool:
     """Generate a fresh batch of questions for one opted-in topic per night.
@@ -703,6 +768,19 @@ async def _maybe_refresh_topics() -> bool:
             all_questions = [r["question"] for r in db.all_rows(
                 con, "SELECT question FROM cards WHERE topic_id=?", (topic["id"],))]
             srcs = db.all_rows(con, "SELECT * FROM sources WHERE topic_id=?", (topic["id"],))
+            total_cards = len(all_questions)
+            trigger_user, mastery = _top_mastery(con, topic["id"], total_cards)
+
+        # If a learner has mastered the plan, grow the curriculum deeper instead of
+        # just drilling weak spots (they have none). Bounded by MAX_PLAN_UNITS.
+        if (mastery >= DEEPEN_THRESHOLD and len(plan["units"]) < MAX_PLAN_UNITS
+                and trigger_user):
+            log.info("Topic %s: learner %s at %.0f%% mastery -> deepening plan",
+                     topic["id"], trigger_user, mastery * 100)
+            await _deepen_plan(topic, plan, user, trigger_user, all_questions, srcs)
+            _fail_counts.pop(key, None)
+            return True
+
         if len(all_questions) >= topic["card_count"] * REFRESH_CAP_FACTOR:
             log.info("Nightly refresh: topic %s at cap (%s cards), skipping",
                      topic["id"], len(all_questions))

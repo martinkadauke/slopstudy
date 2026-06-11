@@ -1,4 +1,4 @@
-"""Ollama client and the prompt engineering for study-plan + card generation."""
+"""LLM clients (Ollama + DeepSeek) and prompt engineering for study generation."""
 import json
 import math
 import re
@@ -18,43 +18,77 @@ MODE_LABELS = {
 
 
 class OllamaError(Exception):
-    pass
+    """Raised for any LLM transport/response error (name kept for back-compat)."""
 
 
-def _headers(user: dict) -> dict:
-    headers = {"Content-Type": "application/json"}
-    if user.get("ollama_api_key"):
-        headers["Authorization"] = f"Bearer {user['ollama_api_key']}"
-    return headers
+# An "actor" dict carries the resolved provider connection (see db.model_config):
+#   llm_provider, llm_base_url, llm_api_key, llm_model.
+# Older call sites may still pass ollama_* keys; _norm() bridges both.
+def _norm(actor: dict) -> tuple[str, str, str, str]:
+    provider = actor.get("llm_provider") or "ollama"
+    base_url = (actor.get("llm_base_url") or actor.get("ollama_url") or "").rstrip("/")
+    api_key = actor.get("llm_api_key") if actor.get("llm_api_key") is not None \
+        else actor.get("ollama_api_key", "")
+    model = actor.get("llm_model") or actor.get("ollama_model") or ""
+    return provider, base_url, api_key, model
 
 
-async def chat_json(user: dict, system: str, prompt: str) -> dict:
+async def chat_json(actor: dict, system: str, prompt: str) -> dict:
     """One non-streaming chat call with JSON output mode. Returns parsed JSON."""
-    url = user["ollama_url"].rstrip("/") + "/api/chat"
+    provider, base_url, api_key, model = _norm(actor)
+    if provider == "deepseek":
+        return await _deepseek_json(base_url, api_key, model, system, prompt)
+    return await _ollama_json(base_url, api_key, model, system, prompt)
+
+
+async def _ollama_json(base_url, api_key, model, system, prompt) -> dict:
+    url = base_url + "/api/chat"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     payload = {
-        "model": user["ollama_model"],
-        "stream": False,
-        "format": "json",
+        "model": model, "stream": False, "format": "json",
         "options": {"temperature": 0.6, "num_ctx": 8192},
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-        ],
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user", "content": prompt}],
     }
     try:
         async with httpx.AsyncClient(timeout=GENERATION_TIMEOUT) as client:
-            resp = await client.post(url, json=payload, headers=_headers(user))
+            resp = await client.post(url, json=payload, headers=headers)
     except httpx.HTTPError as e:
-        raise OllamaError(f"Cannot reach Ollama at {user['ollama_url']}: {e}") from e
+        raise OllamaError(f"Cannot reach Ollama at {base_url}: {e}") from e
     if resp.status_code == 404:
-        raise OllamaError(
-            f"Model '{user['ollama_model']}' not found on the Ollama server. "
-            f"Pull it first: ollama pull {user['ollama_model']}"
-        )
+        raise OllamaError(f"Model '{model}' not found on Ollama. Pull it: ollama pull {model}")
     if resp.status_code != 200:
         raise OllamaError(f"Ollama returned HTTP {resp.status_code}: {resp.text[:300]}")
-    content = resp.json().get("message", {}).get("content", "")
-    return _parse_json(content)
+    return _parse_json(resp.json().get("message", {}).get("content", ""))
+
+
+async def _deepseek_json(base_url, api_key, model, system, prompt) -> dict:
+    """DeepSeek is OpenAI-compatible. JSON mode needs the word 'json' in the prompt,
+    which our prompts already include ('Respond ONLY with JSON')."""
+    if not api_key:
+        raise OllamaError("DeepSeek API key is not configured (Admin → AI models).")
+    url = base_url + "/chat/completions"
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    payload = {
+        "model": model, "stream": False, "temperature": 0.6,
+        "response_format": {"type": "json_object"},
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user", "content": prompt}],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=GENERATION_TIMEOUT) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+    except httpx.HTTPError as e:
+        raise OllamaError(f"Cannot reach DeepSeek at {base_url}: {e}") from e
+    if resp.status_code == 401:
+        raise OllamaError("DeepSeek rejected the API key (401).")
+    if resp.status_code == 402:
+        raise OllamaError("DeepSeek: insufficient balance (402).")
+    if resp.status_code != 200:
+        raise OllamaError(f"DeepSeek returned HTTP {resp.status_code}: {resp.text[:300]}")
+    return _parse_json(resp.json()["choices"][0]["message"]["content"])
 
 
 def _parse_json(content: str) -> dict:
@@ -71,19 +105,37 @@ def _parse_json(content: str) -> dict:
     raise OllamaError("The model did not return valid JSON. Try a larger/more capable model.")
 
 
-async def test_connection(user: dict) -> dict:
-    """Lightweight connectivity + model check for the settings page."""
-    base = user["ollama_url"].rstrip("/")
+async def test_connection(actor: dict) -> dict:
+    """Lightweight connectivity + model check for a provider (admin settings page)."""
+    provider, base_url, api_key, model = _norm(actor)
+    if provider == "deepseek":
+        if not api_key:
+            raise OllamaError("DeepSeek API key is not configured.")
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(
+                    base_url + "/models",
+                    headers={"Authorization": f"Bearer {api_key}"})
+        except httpx.HTTPError as e:
+            raise OllamaError(f"Cannot reach DeepSeek: {e}") from e
+        if resp.status_code == 401:
+            raise OllamaError("DeepSeek rejected the API key (401).")
+        if resp.status_code != 200:
+            raise OllamaError(f"DeepSeek returned HTTP {resp.status_code}: {resp.text[:200]}")
+        models = [m.get("id", "") for m in resp.json().get("data", [])]
+        return {"ok": True, "provider": "deepseek", "models": models,
+                "model_available": (model in models) if models else True}
+    # ollama
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(base + "/api/tags", headers=_headers(user))
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            resp = await client.get(base_url + "/api/tags", headers=headers)
             resp.raise_for_status()
     except httpx.HTTPError as e:
         raise OllamaError(f"Cannot reach Ollama: {e}") from e
     models = [m.get("name", "") for m in resp.json().get("models", [])]
-    wanted = user["ollama_model"]
-    available = any(m == wanted or m.split(":")[0] == wanted for m in models)
-    return {"ok": True, "models": models, "model_available": available}
+    available = any(m == model or m.split(":")[0] == model for m in models)
+    return {"ok": True, "provider": "ollama", "models": models, "model_available": available}
 
 
 # ---------------------------------------------------------------- prompts
@@ -733,6 +785,60 @@ async def plan_revision(user: dict, topic: dict, plan: dict, cards: list[dict],
         "add_focus": str(data.get("add_focus", "")).strip(),
         "summary": str(data.get("summary", "")).strip(),
     }
+
+
+DEEPEN_SYSTEM = """You are an expert curriculum designer. A learner has MASTERED the current \
+study plan for a topic — they now need to go further. Extend the plan with {n_new} brand-new \
+unit(s) that either (a) go DEEPER into advanced, nuanced, or edge-case aspects of the existing \
+material, or (b) cover closely NEIGHBOURING subtopics that naturally build on what they've \
+mastered. Follow Bloom's higher tiers (analyze, evaluate, apply to novel cases).
+
+Hard rules:
+- Do NOT duplicate or lightly rephrase any existing unit (their titles are listed).
+- Each new unit must be genuinely more advanced or adjacent, not a rehash.
+- Same shape as the existing units: title, objectives, key_concepts, pitfalls.
+
+Respond ONLY with JSON:
+{{"units": [{{"title": "...", "objectives": ["..."], "key_concepts": ["..."], "pitfalls": ["..."]}}]}}
+Return exactly {n_new} unit(s). Write all text in {language}."""
+
+DEEPEN_USER = """TOPIC: {title}
+OVERVIEW: {overview}
+
+EXISTING UNITS (do not duplicate):
+{units_block}
+
+The learner has mastered the above. Propose the deeper/neighbouring unit(s)."""
+
+
+async def deepen_plan(user: dict, topic: dict, plan: dict, n_new: int = 1) -> list[dict]:
+    """Propose new advanced/neighbouring units to extend a mastered plan."""
+    language = LANG_NAMES.get(topic["language"], "English")
+    existing_titles = [u.get("title", "") for u in plan.get("units", [])]
+    units_block = "\n".join(f"- {tt}" for tt in existing_titles)
+    data = await chat_json(
+        user,
+        DEEPEN_SYSTEM.format(n_new=n_new, language=language),
+        DEEPEN_USER.format(title=plan.get("title", topic.get("title", "")),
+                           overview=plan.get("overview", ""), units_block=units_block),
+    )
+    units = data.get("units")
+    if not isinstance(units, list) or not units:
+        raise OllamaError("Deepening returned no new units.")
+    # Drop any that duplicate an existing unit title.
+    seen = {tt.strip().lower() for tt in existing_titles}
+    fresh = []
+    for u in units[:n_new]:
+        title = str(u.get("title", "")).strip()
+        if title and title.lower() not in seen:
+            u["objectives"] = u.get("objectives", []) or []
+            u["key_concepts"] = u.get("key_concepts", []) or []
+            u["pitfalls"] = u.get("pitfalls", []) or []
+            fresh.append(u)
+            seen.add(title.lower())
+    if not fresh:
+        raise OllamaError("Deepening only produced duplicate units.")
+    return fresh
 
 
 async def generate_weakness_report(user: dict, cards_block: str) -> str:

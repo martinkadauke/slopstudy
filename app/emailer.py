@@ -229,6 +229,16 @@ NOTICES = {
                "wurdest abgemeldet. Wenn du das für einen Fehler hältst, wende dich an deinen "
                "Administrator.\n\n{link}"),
     },
+    "plan_deepened": {
+        "en": ("You've unlocked deeper material in \"{title}\"",
+               "Hi {name},\n\nimpressive — you've mastered most of \"{title}\", so SlopStudy "
+               "extended your study plan with a new, more advanced unit:\n\n  • {unit}\n\nFresh "
+               "cards for it are being generated now. Keep going:\n{link}"),
+        "de": ("Du hast tiefergehendes Material in \"{title}\" freigeschaltet",
+               "Hallo {name},\n\nbeeindruckend — du beherrschst \"{title}\" größtenteils, daher "
+               "hat SlopStudy deinen Lernplan um eine neue, anspruchsvollere Einheit erweitert:"
+               "\n\n  • {unit}\n\nFrische Karten dazu werden gerade erstellt. Weiter so:\n{link}"),
+    },
     "card_reevaluated": {
         "en": ("We re-checked the card you disputed",
                "Hi {name},\n\nthanks for flagging a card in \"{title}\". The AI re-examined it "

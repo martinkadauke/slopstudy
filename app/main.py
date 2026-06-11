@@ -309,23 +309,38 @@ def change_password(body: PasswordBody, user: dict = Depends(auth.current_user))
 class OllamaBody(BaseModel):
     ollama_url: str = Field(min_length=1, max_length=300)
     ollama_model: str = Field(min_length=1, max_length=100)
-    ollama_api_key: str | None = None  # None = keep existing
-    task_models: dict[str, str] | None = None  # per-task overrides, "" = default
+    ollama_api_key: str | None = None        # None = keep existing
+    deepseek_model: str | None = None
+    deepseek_api_key: str | None = None      # None = keep existing
+    default_provider: str | None = None
+    # per task: {"generate": {"provider": "ollama|deepseek|", "model": "..."}, ...}
+    tasks: dict[str, dict] | None = None
+    # legacy: flat per-task ollama model names (older frontend)
+    task_models: dict[str, str] | None = None
 
 
-# The Ollama connection is shared infrastructure — only admins manage it.
+# AI providers + models are shared infrastructure — only admins manage them.
 
 @app.get("/api/admin/ollama")
 def get_ollama(admin: dict = Depends(auth.current_admin)):
     with db.connect() as con:
-        cfg = db.ollama_config(con)
-        task_models = {t: db.get_setting(con, f"ollama_model_{t}", "")
-                       for t in db.OLLAMA_TASKS}
-    return {
-        "ollama_url": cfg["ollama_url"], "ollama_model": cfg["ollama_model"],
-        "ollama_api_key_set": bool(cfg["ollama_api_key"]),
-        "task_models": task_models,
-    }
+        tasks = {
+            t: {"provider": db.get_setting(con, f"task_provider_{t}", ""),
+                "model": db.get_setting(con, f"task_model_{t}", "")}
+            for t in db.LLM_TASKS
+        }
+        return {
+            "providers": list(db.PROVIDERS),
+            "default_provider": db.get_setting(con, "default_provider", "ollama") or "ollama",
+            "ollama_url": db.get_setting(con, "ollama_url", db.DEFAULT_OLLAMA_URL),
+            "ollama_model": db.get_setting(con, "ollama_model", db.DEFAULT_OLLAMA_MODEL),
+            "ollama_api_key_set": bool(db.get_setting(con, "ollama_api_key", "")),
+            "deepseek_model": db.get_setting(con, "deepseek_model", db.DEFAULT_DEEPSEEK_MODEL),
+            "deepseek_api_key_set": bool(db.get_setting(con, "deepseek_api_key", "")),
+            "tasks": tasks,
+            # kept so the older flat UI still renders something sensible
+            "task_models": {t: tasks[t]["model"] for t in db.LLM_TASKS},
+        }
 
 
 @app.put("/api/admin/ollama")
@@ -337,17 +352,34 @@ def set_ollama(body: OllamaBody, admin: dict = Depends(auth.current_admin)):
         db.set_setting(con, "ollama_model", body.ollama_model.strip())
         if body.ollama_api_key is not None:
             db.set_setting(con, "ollama_api_key", body.ollama_api_key.strip())
-        if body.task_models is not None:
-            for task in db.OLLAMA_TASKS:
-                db.set_setting(con, f"ollama_model_{task}",
+        if body.deepseek_model is not None:
+            db.set_setting(con, "deepseek_model", body.deepseek_model.strip())
+        if body.deepseek_api_key is not None:
+            db.set_setting(con, "deepseek_api_key", body.deepseek_api_key.strip())
+        if body.default_provider in db.PROVIDERS:
+            db.set_setting(con, "default_provider", body.default_provider)
+        if body.tasks is not None:
+            for task in db.LLM_TASKS:
+                spec = body.tasks.get(task) or {}
+                prov = str(spec.get("provider", "")).strip()
+                db.set_setting(con, f"task_provider_{task}",
+                               prov if prov in db.PROVIDERS else "")
+                db.set_setting(con, f"task_model_{task}", str(spec.get("model", "")).strip())
+        elif body.task_models is not None:  # legacy flat form
+            for task in db.LLM_TASKS:
+                db.set_setting(con, f"task_model_{task}",
                                str(body.task_models.get(task, "")).strip())
     return {"ok": True}
 
 
 @app.post("/api/admin/ollama/test")
-async def test_ollama(admin: dict = Depends(auth.current_admin)):
+async def test_ollama(provider: str = "", admin: dict = Depends(auth.current_admin)):
     with db.connect() as con:
-        cfg = db.ollama_config(con)
+        prov = provider if provider in db.PROVIDERS \
+            else (db.get_setting(con, "default_provider", "ollama") or "ollama")
+        base_url, api_key, model = db._provider_conn(con, prov)
+    cfg = {"llm_provider": prov, "llm_base_url": base_url,
+           "llm_api_key": api_key, "llm_model": model}
     try:
         return await llm.test_connection(cfg)
     except llm.OllamaError as e:
@@ -1375,9 +1407,10 @@ async def answer_card(session_id: int, body: AnswerBody,
                                 body.answer, body.self_grade)
         # For free-text answers a string miss may still be semantically right —
         # let the admin-configured judge model decide (e.g. "CO2" == "carbon dioxide").
-        judge_model = db.get_setting(con, "ollama_model_judge", "") \
-            if (card["type"] == "exact" and not correct and body.answer.strip()) else ""
-        judge_actor = {**user, **db.ollama_config(con, "judge")} if judge_model else None
+        judge_on = bool(db.get_setting(con, "task_model_judge", "")
+                        or db.get_setting(con, "task_provider_judge", "")) \
+            and card["type"] == "exact" and not correct and body.answer.strip()
+        judge_actor = {**user, **db.model_config(con, "judge")} if judge_on else None
 
     if judge_actor:
         try:
