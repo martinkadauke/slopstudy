@@ -117,6 +117,17 @@ CREATE INDEX IF NOT EXISTS idx_topics_user ON topics(user_id);
 CREATE INDEX IF NOT EXISTS idx_cards_topic ON cards(topic_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON study_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_answer_log_user ON answer_log(user_id, answered_at);
+CREATE TABLE IF NOT EXISTS card_reevals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
+    topic_id INTEGER NOT NULL REFERENCES topics(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE SET NULL,
+    context TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'queued',   -- queued|processing|done|failed
+    result_msg TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -160,6 +171,8 @@ MIGRATIONS = [
     ("topics", "queue_priority", "INTEGER NOT NULL DEFAULT 0"),
     ("topics", "translations_json", "TEXT NOT NULL DEFAULT ''"),
     ("topics", "content_translated", "INTEGER NOT NULL DEFAULT 0"),
+    ("topics", "visibility", "TEXT NOT NULL DEFAULT 'public'"),
+    ("topics", "category", "TEXT NOT NULL DEFAULT ''"),
     ("topics", "paused", "INTEGER NOT NULL DEFAULT 0"),
     ("topics", "cancel_requested", "INTEGER NOT NULL DEFAULT 0"),
     ("topics", "enrich_paused", "INTEGER NOT NULL DEFAULT 0"),
@@ -222,7 +235,7 @@ DEFAULT_OLLAMA_MODEL = "llama3.1"
 
 
 # AI task families that can each run on their own (e.g. smaller/faster) model.
-OLLAMA_TASKS = ("generate", "enrich", "translate", "report")
+OLLAMA_TASKS = ("generate", "enrich", "translate", "report", "judge")
 
 
 def ollama_config(con, task: str | None = None) -> dict:

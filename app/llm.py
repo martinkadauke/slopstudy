@@ -495,6 +495,50 @@ def other_lang(lang: str) -> str:
     return "en" if lang == "de" else "de"
 
 
+# Fixed taxonomy so the public catalogue groups cleanly (the model must pick one).
+CATEGORIES = [
+    "Science & Nature", "Medicine & Health", "Technology & IT", "Mathematics",
+    "Languages", "History & Geography", "Business & Economics", "Law & Politics",
+    "Arts & Humanities", "Exam Prep & Certifications", "Other",
+]
+
+
+JUDGE_SYSTEM = """You grade a learner's free-text answer against the reference answer for a \
+flashcard. Reply ONLY with JSON {"correct": true|false}.
+
+Mark correct=true if the learner's answer means the SAME THING as the reference answer — accept \
+synonyms, paraphrases, different word order, abbreviations/expansions, and spelling/case \
+differences. Mark correct=false if it names a different concept, is factually different, or is \
+missing the key point. Be strict about factual identity (a different number, name, or term is \
+wrong), lenient about wording."""
+
+JUDGE_USER = """QUESTION: {question}
+REFERENCE ANSWER: {expected}
+LEARNER'S ANSWER: {given}"""
+
+
+async def judge_answer(user: dict, question: str, expected: str, given: str) -> bool:
+    """Semantic equivalence check for free-text (exact-mode) answers. Returns
+    True/False; raises on transport errors so the caller can fall back."""
+    data = await chat_json(
+        user, JUDGE_SYSTEM,
+        JUDGE_USER.format(question=question[:300], expected=expected, given=given[:300]),
+    )
+    return bool(data.get("correct"))
+
+
+async def categorize_topic(user: dict, title: str, overview: str) -> str:
+    """Pick the single best catalogue category for a topic from the fixed list."""
+    system = (
+        "You categorize a study topic into exactly ONE of these categories:\n"
+        + "\n".join(f"- {c}" for c in CATEGORIES)
+        + '\n\nRespond ONLY with JSON: {"category": "<one category, copied verbatim>"}'
+    )
+    data = await chat_json(user, system, f"TITLE: {title}\nOVERVIEW: {overview}")
+    cat = str(data.get("category", "")).strip()
+    return cat if cat in CATEGORIES else "Other"
+
+
 TRANSLATE_PLAN_SYSTEM = """You translate a study-plan JSON object into {target}. Keep the \
 structure and keys EXACTLY identical — translate only the string values (title, overview, and \
 each unit's title, objectives, key_concepts, pitfalls). Use the terminology a {target} textbook \
@@ -591,6 +635,71 @@ UNITS:
 
 CURRENT CARDS:
 {cards_block}"""
+
+
+REEVAL_SYSTEM = """You are a meticulous, skeptical fact-checker and exam author. A learner \
+disputes a flashcard — they believe the marked answer is wrong, and gave their reasoning.
+
+Re-examine the card from scratch. Be critical of BOTH sides: do NOT assume the card's original \
+answer is right, and do NOT assume the learner is right either — either or both may be mistaken. \
+Weigh the provided web search results as evidence over your prior assumptions.
+
+Produce a corrected version of the SAME card: keep its type ("{card_type}") and format. Fix the \
+question, answer{choices_note} and explanation so they are factually correct and unambiguous. If \
+after checking the original card was actually correct, return it essentially unchanged. The \
+"explanation" must briefly justify the answer with the evidence. Also write a short "note" \
+(1-2 sentences, in {language}) telling the learner what you concluded — what you changed and why, \
+or that the original was right after all.
+
+{mode_rules}
+
+Respond ONLY with JSON:
+{{"card": {{"type": "{card_type}", "question": "...", "answer": "...", "choices": [...], "explanation": "...", "difficulty": 1}}, "note": "..."}}
+Write all card text in {language}."""
+
+REEVAL_USER = """TOPIC: {topic_title}
+
+DISPUTED FLASHCARD:
+  type: {card_type}
+  question: {question}
+  current marked answer: {answer}
+  current choices: {choices}
+  current explanation: {explanation}
+
+THE LEARNER'S OBJECTION:
+{context}
+
+WEB SEARCH RESULTS (evidence — prefer trustworthy encyclopedic/academic/official sources):
+{results_block}"""
+
+
+async def reevaluate_card(user: dict, topic: dict, card: dict, context: str,
+                          results: list[dict]) -> dict:
+    """Critically re-check a disputed card against web evidence; return a corrected
+    card (validated, same type) plus a short note on what changed."""
+    language = LANG_NAMES.get(topic["language"], "English")
+    card_type = card["type"]
+    mode = {"multiple_choice": "multiple_choice", "exact": "exact",
+            "yes_no": "yes_no", "open": "exam"}.get(card_type, "multiple_choice")
+    choices_note = ", the four choices," if card_type == "multiple_choice" else ""
+    results_block = "\n".join(
+        f"[{i + 1}] {r['title']}\n    URL: {r['url']}\n    {r['snippet']}"
+        for i, r in enumerate(results)
+    ) or "(no search results available)"
+    system = REEVAL_SYSTEM.format(
+        card_type=card_type, choices_note=choices_note, language=language,
+        mode_rules=MODE_RULES.get(mode, ""))
+    prompt = REEVAL_USER.format(
+        topic_title=topic.get("title", ""), card_type=card_type, question=card["question"],
+        answer=card["answer"], choices=card.get("choices") or "(none)",
+        explanation=card.get("explanation", ""), context=context[:1000],
+        results_block=results_block)
+    data = await chat_json(user, system, prompt)
+    raw = data.get("card") or {}
+    valid = _validate_cards([raw], mode)
+    if not valid:
+        raise OllamaError("Re-evaluation did not return a usable corrected card.")
+    return {"card": valid[0], "note": str(data.get("note", "")).strip()}
 
 
 async def plan_revision(user: dict, topic: dict, plan: dict, cards: list[dict],

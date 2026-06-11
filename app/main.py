@@ -366,11 +366,13 @@ async def create_topic(
     mode: str = Form("multiple_choice"),
     card_count: int = Form(40),
     language: str = Form("en"),
+    visibility: str = Form("public"),
     urls: str = Form(""),
     files: list[UploadFile] = File(default=[]),
 ):
     if mode not in VALID_MODES:
         raise HTTPException(422, "invalid_mode")
+    visibility = "private" if visibility == "private" else "public"
     card_count = max(10, min(120, card_count))
     language = language if language in ("en", "de") else "en"
     url_list = [u.strip() for u in urls.splitlines() if u.strip()][:10]
@@ -380,9 +382,9 @@ async def create_topic(
 
     with db.connect() as con:
         cur = con.execute(
-            """INSERT INTO topics (user_id, prompt, mode, card_count, language, status, created_at)
-               VALUES (?,?,?,?,?, 'queued', ?)""",
-            (user["id"], prompt.strip(), mode, card_count, language, db.now()),
+            """INSERT INTO topics (user_id, prompt, mode, card_count, language, visibility,
+               status, created_at) VALUES (?,?,?,?,?,?, 'queued', ?)""",
+            (user["id"], prompt.strip(), mode, card_count, language, visibility, db.now()),
         )
         topic_id = cur.lastrowid
         for u in url_list:
@@ -427,6 +429,7 @@ def _topic_summary(con, topic: dict, want_lang: str | None = None) -> dict:
         "card_count": cards, "requested_cards": topic["card_count"],
         "units": len(plan["units"]) if plan else 0,
         "nightly_refresh": bool(topic["nightly_refresh"]),
+        "visibility": topic["visibility"], "category": topic["category"] or "Other",
         "created_at": topic["created_at"], "ready_at": topic["ready_at"],
     }
 
@@ -446,7 +449,8 @@ def list_topics(user: dict = Depends(auth.current_user)):
         for topic in topics:
             summary = _topic_summary(con, topic, want_lang=user["language"])
             summary["shared"] = topic["user_id"] != user["id"]
-            summary["owner_name"] = topic["owner_name"]
+            # The creator's identity is admin-only; regular members never see it.
+            summary["owner_name"] = topic["owner_name"] if user.get("is_admin") else None
             if topic["status"] == "ready":
                 summary["due_cards"] = _count_due(con, user["id"], topic["id"])
             out.append(summary)
@@ -487,8 +491,12 @@ def get_topic(topic_id: int, user: dict = Depends(auth.current_user)):
         topic, is_owner = _accessible_topic(con, topic_id, user)
         out = _topic_summary(con, topic, want_lang=user["language"])
         out["is_owner"] = is_owner
-        owner = db.one(con, "SELECT name FROM users WHERE id=?", (topic["user_id"],))
-        out["owner_name"] = owner["name"] if owner else "?"
+        # Creator identity is admin-only (the owner implicitly knows it's theirs).
+        if user.get("is_admin"):
+            owner = db.one(con, "SELECT name FROM users WHERE id=?", (topic["user_id"],))
+            out["owner_name"] = owner["name"] if owner else "?"
+        else:
+            out["owner_name"] = None
         # Live progress of background AI work (incl. translations) for this deck.
         out["ai"] = db.one(
             con,
@@ -545,6 +553,7 @@ def get_topic(topic_id: int, user: dict = Depends(auth.current_user)):
 class TopicSettingsBody(BaseModel):
     nightly_refresh: bool | None = None
     mode: str | None = None  # applies to newly generated questions
+    visibility: str | None = None
 
 
 @app.put("/api/topics/{topic_id}")
@@ -559,6 +568,67 @@ def update_topic(topic_id: int, body: TopicSettingsBody,
             if body.mode not in VALID_MODES:
                 raise HTTPException(422, "invalid_mode")
             con.execute("UPDATE topics SET mode=? WHERE id=?", (body.mode, topic_id))
+        if body.visibility is not None:
+            vis = "private" if body.visibility == "private" else "public"
+            con.execute("UPDATE topics SET visibility=? WHERE id=?", (vis, topic_id))
+    return {"ok": True}
+
+
+# -------------------------------------------------- public topic catalogue
+
+@app.get("/api/catalogue")
+def catalogue(user: dict = Depends(auth.current_user)):
+    """Public, ready topics grouped by category — for self-enrollment. The
+    creator's identity is intentionally not included (admin-only elsewhere)."""
+    with db.connect() as con:
+        rows = db.all_rows(
+            con,
+            """SELECT t.id, t.title, t.prompt, t.category, t.language, t.mode,
+                      t.translations_json,
+                      (SELECT COUNT(*) FROM cards c WHERE c.topic_id=t.id) AS card_count,
+                      (t.user_id = :uid) AS is_owner,
+                      EXISTS(SELECT 1 FROM topic_members m
+                             WHERE m.topic_id=t.id AND m.user_id=:uid) AS joined
+               FROM topics t
+               WHERE t.status='ready' AND t.visibility='public'
+               ORDER BY t.category, t.id DESC""",
+            {"uid": user["id"]},
+        )
+    topics = []
+    for r in rows:
+        title = _topic_translation(r, user["language"]).get("title") \
+            or r["title"] or r["prompt"][:60]
+        topics.append({
+            "id": r["id"], "title": title, "category": r["category"] or "Other",
+            "mode": r["mode"], "card_count": r["card_count"],
+            "is_owner": bool(r["is_owner"]), "joined": bool(r["joined"]),
+        })
+    return {"categories": llm.CATEGORIES, "topics": topics}
+
+
+@app.post("/api/topics/{topic_id}/join")
+def join_topic(topic_id: int, user: dict = Depends(auth.current_user)):
+    """Self-enroll in a public topic from the catalogue."""
+    with db.connect() as con:
+        topic = db.one(con, "SELECT * FROM topics WHERE id=?", (topic_id,))
+        if not topic or topic["visibility"] != "public" or topic["status"] != "ready":
+            raise HTTPException(404, "topic_not_found")
+        if topic["user_id"] == user["id"]:
+            return {"ok": True}  # owner is implicitly enrolled
+        con.execute(
+            """INSERT INTO topic_members (topic_id, user_id, added_at) VALUES (?,?,?)
+               ON CONFLICT(topic_id, user_id) DO NOTHING""",
+            (topic_id, user["id"], db.now()),
+        )
+    return {"ok": True}
+
+
+@app.post("/api/topics/{topic_id}/leave")
+def leave_topic(topic_id: int, user: dict = Depends(auth.current_user)):
+    """Un-enroll from a topic the user joined (owners can't leave their own)."""
+    with db.connect() as con:
+        con.execute("DELETE FROM topic_members WHERE topic_id=? AND user_id=?",
+                    (topic_id, user["id"]))
     return {"ok": True}
 
 
@@ -700,6 +770,31 @@ def list_topic_cards(topic_id: int, user: dict = Depends(auth.current_user)):
                FROM cards WHERE topic_id=? ORDER BY unit_index, id""",
             (topic_id,),
         )
+
+
+class ReevalBody(BaseModel):
+    context: str = Field(default="", max_length=1000)
+
+
+@app.post("/api/cards/{card_id}/reevaluate")
+def reevaluate_card(card_id: int, body: ReevalBody, user: dict = Depends(auth.current_user)):
+    """Dispute a card: queue an AI re-check (any user studying the deck may flag)."""
+    with db.connect() as con:
+        card = db.one(con, "SELECT topic_id FROM cards WHERE id=?", (card_id,))
+        if not card:
+            raise HTTPException(404, "card_not_found")
+        _accessible_topic(con, card["topic_id"], user)  # owner, admin, or member
+        pending = db.one(
+            con, "SELECT id FROM card_reevals WHERE card_id=? AND status IN ('queued','processing')",
+            (card_id,))
+        if pending:
+            raise HTTPException(409, "reeval_pending")
+        con.execute(
+            """INSERT INTO card_reevals (card_id, topic_id, user_id, context, created_at)
+               VALUES (?,?,?,?,?)""",
+            (card_id, card["topic_id"], user["id"], body.context.strip(), db.now()),
+        )
+    return {"ok": True}
 
 
 @app.delete("/api/cards/{card_id}")
@@ -1259,7 +1354,8 @@ class AnswerBody(BaseModel):
 
 
 @app.post("/api/sessions/{session_id}/answer")
-def answer_card(session_id: int, body: AnswerBody, user: dict = Depends(auth.current_user)):
+async def answer_card(session_id: int, body: AnswerBody,
+                      user: dict = Depends(auth.current_user)):
     with db.connect() as con:
         session = _own_open_session(con, session_id, user["id"])
         card_ids = json.loads(session["card_ids_json"])
@@ -1277,15 +1373,33 @@ def answer_card(session_id: int, body: AnswerBody, user: dict = Depends(auth.cur
         view = _card_view(card, user["language"], topic_lang)
         correct = _check_answer({"type": card["type"], "answer": view["answer"]},
                                 body.answer, body.self_grade)
+        # For free-text answers a string miss may still be semantically right —
+        # let the admin-configured judge model decide (e.g. "CO2" == "carbon dioxide").
+        judge_model = db.get_setting(con, "ollama_model_judge", "") \
+            if (card["type"] == "exact" and not correct and body.answer.strip()) else ""
+        judge_actor = {**user, **db.ollama_config(con, "judge")} if judge_model else None
+
+    if judge_actor:
+        try:
+            if await llm.judge_answer(judge_actor, view["question"], view["answer"], body.answer):
+                correct = True
+        except Exception:
+            pass  # transport/model error → keep the string-comparison result
+
+    with db.connect() as con:
+        session = _own_open_session(con, session_id, user["id"])
+        answered = json.loads(session["answered_json"] or "{}")
+        if str(body.card_id) in answered:
+            raise HTTPException(409, "already_answered")
         delta = game.points_correct(card["difficulty"]) if correct \
             else game.points_wrong(card["difficulty"])
         new_points = game.apply_points(con, user["id"], delta)
-        answered[str(body.card_id)] = "correct" if correct else "wrong"
+        result = "correct" if correct else "wrong"
+        answered[str(body.card_id)] = result
         con.execute(
             "UPDATE study_sessions SET answered_json=?, points_earned=points_earned+? WHERE id=?",
             (json.dumps(answered), delta, session_id),
         )
-        result = "correct" if correct else "wrong"
         _record_progress(con, user["id"], card, result)
         _log_answer(con, user["id"], session, card, result)
     return {

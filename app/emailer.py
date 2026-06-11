@@ -229,6 +229,16 @@ NOTICES = {
                "wurdest abgemeldet. Wenn du das für einen Fehler hältst, wende dich an deinen "
                "Administrator.\n\n{link}"),
     },
+    "card_reevaluated": {
+        "en": ("We re-checked the card you disputed",
+               "Hi {name},\n\nthanks for flagging a card in \"{title}\". The AI re-examined it "
+               "against fresh sources and here's what it concluded:\n\n{note}\n\nThe corrected "
+               "card is back in your deck for review:\n{link}"),
+        "de": ("Wir haben die von dir gemeldete Karte überprüft",
+               "Hallo {name},\n\ndanke, dass du eine Karte in \"{title}\" gemeldet hast. Die KI "
+               "hat sie anhand frischer Quellen erneut geprüft. Ergebnis:\n\n{note}\n\nDie "
+               "korrigierte Karte liegt zur Wiederholung wieder in deinem Stapel:\n{link}"),
+    },
     "account_enabled": {
         "en": ("Your SlopStudy account was reactivated",
                "Hi {name},\n\ngood news — your account was reactivated. Welcome back!\n\n{link}"),

@@ -46,6 +46,7 @@ async def run_forever():
     with db.connect() as con:
         con.execute("UPDATE topics SET status='queued', progress_pct=0 WHERE status='processing'")
         con.execute("UPDATE topic_revisions SET status='queued' WHERE status='processing'")
+        con.execute("UPDATE card_reevals SET status='queued' WHERE status='processing'")
     log.info("Worker started: heavy + light lanes (report hour: %02d:00)", REPORT_HOUR)
     await asyncio.gather(_heavy_loop(), _light_loop())
 
@@ -71,9 +72,13 @@ async def _heavy_loop():
 
 
 async def _light_loop():
-    """Enrichment, translations and weakness reports — typically a smaller model."""
+    """Enrichment, translations, card disputes and weakness reports."""
     while True:
         try:
+            if await _process_reeval():  # user-triggered disputes take priority
+                continue
+            if await _categorize_step():
+                continue
             if await _enrich_step():
                 continue
             await _maybe_send_reports()
@@ -204,6 +209,67 @@ async def _process(topic: dict):
         log.exception("Topic %s failed", topic_id)
         _update(topic_id, status="failed", error=message[:500], progress_pct=0)
         await emailer.send_topic_failed(user, topic, message[:500])
+
+
+# ------------------------------------------------------------- card disputes
+
+async def _process_reeval() -> bool:
+    """Re-evaluate one disputed card: critically re-check it against fresh web
+    evidence and rewrite it in place, then let it re-enrich/re-translate."""
+    with db.connect() as con:
+        rev = db.one(con, "SELECT * FROM card_reevals WHERE status='queued' ORDER BY id LIMIT 1")
+        if not rev:
+            return False
+        card = db.one(con, "SELECT * FROM cards WHERE id=?", (rev["card_id"],))
+        topic = db.one(con, "SELECT * FROM topics WHERE id=?", (rev["topic_id"],))
+        disputer = db.one(con, "SELECT * FROM users WHERE id=?", (rev["user_id"],))
+        owner = _ollama_actor(con, db.one(con, "SELECT * FROM users WHERE id=?",
+                                          (topic["user_id"],)) if topic else None, task="generate")
+        con.execute("UPDATE card_reevals SET status='processing' WHERE id=?", (rev["id"],))
+    if not card or not topic:
+        with db.connect() as con:
+            con.execute("UPDATE card_reevals SET status='failed', result_msg='card gone' WHERE id=?",
+                        (rev["id"],))
+        return True
+
+    card_view = {
+        "type": card["type"], "question": card["question"], "answer": card["answer"],
+        "choices": json.loads(card["choices_json"]) if card["choices_json"] else [],
+        "explanation": card["explanation"],
+    }
+    try:
+        results = await websearch.search(f"{topic['title']} {card['question'][:120]}")
+        data = await llm.reevaluate_card(owner, topic, card_view, rev["context"], results)
+        new = data["card"]
+        with db.connect() as con:
+            # Rewrite the card and clear derived content so the pipeline regenerates
+            # the deep explanation and translations for the corrected version.
+            con.execute(
+                """UPDATE cards SET question=?, answer=?, choices_json=?, explanation=?,
+                   difficulty=?, long_explanation='', sources_json='', translations_json=''
+                   WHERE id=?""",
+                (new["question"], new["answer"], json.dumps(new["choices"], ensure_ascii=False),
+                 new["explanation"], new["difficulty"], card["id"]),
+            )
+            # The disputer's old progress on this card is stale now — reset it so the
+            # corrected card comes back for review.
+            con.execute("DELETE FROM card_progress WHERE card_id=?", (card["id"],))
+            con.execute("UPDATE card_reevals SET status='done', result_msg=? WHERE id=?",
+                        (data["note"][:400], rev["id"]))
+        log.info("Re-evaluated card %s (topic %s)", card["id"], topic["id"])
+        if disputer and disputer["email_notifications"] and not disputer["disabled"]:
+            emailer.send_notice_sync(
+                disputer["email"], disputer["language"], "card_reevaluated",
+                link_path=f"/#/topic/{topic['id']}", name=disputer["name"],
+                title=topic["title"] or topic["prompt"][:60],
+                note=data["note"][:400] or "—")
+    except Exception as e:
+        msg = str(e) if isinstance(e, llm.OllamaError) else f"Unexpected error: {e}"
+        log.exception("Re-eval %s failed", rev["id"])
+        with db.connect() as con:
+            con.execute("UPDATE card_reevals SET status='failed', result_msg=? WHERE id=?",
+                        (msg[:300], rev["id"]))
+    return True
 
 
 # ------------------------------------------------------------- revisions
@@ -338,6 +404,39 @@ async def _await_or_pause(coro, topic_id: int):
 
 async def _await_or_stop(coro, topic_id: int):
     return await _await_abortable(coro, lambda: _is_cancelled(topic_id), _Stopped)
+
+
+async def _categorize_step() -> bool:
+    """Assign a catalogue category to one ready topic that lacks one (cheap call)."""
+    if background_paused():
+        return False
+    with db.connect() as con:
+        topic = db.one(
+            con,
+            """SELECT * FROM topics WHERE status='ready' AND category='' AND plan_json!=''
+               ORDER BY id DESC LIMIT 1""",
+        )
+        if not topic:
+            return False
+        actor = _ollama_actor(con, db.one(con, "SELECT * FROM users WHERE id=?",
+                                          (topic["user_id"],)), task="enrich")
+    plan = json.loads(topic["plan_json"])
+    key = f"cat:{topic['id']}"
+    try:
+        category = await llm.categorize_topic(
+            actor, plan.get("title", topic["title"]), plan.get("overview", ""))
+        with db.connect() as con:
+            con.execute("UPDATE topics SET category=? WHERE id=?", (category, topic["id"]))
+        _fail_counts.pop(key, None)
+        log.info("Categorized topic %s as %s", topic["id"], category)
+    except Exception as e:
+        log.warning("Categorizing topic %s failed: %s", topic["id"], e)
+        if _record_failure(key):
+            with db.connect() as con:
+                con.execute("UPDATE topics SET category='Other' WHERE id=?", (topic["id"],))
+        else:
+            await asyncio.sleep(POLL_INTERVAL)
+    return True
 
 
 async def _enrich_step() -> bool:

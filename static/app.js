@@ -54,7 +54,7 @@ function apiError(e) {
   const known = { invalid_credentials: 1, email_taken: 1, wrong_password: 1,
     not_enough_points: 1, topic_not_ready: 1, joker_used: 1,
     invite_required: 1, invite_invalid: 1, rate_limited: 1, reset_invalid: 1,
-    account_disabled: 1, cannot_disable_self: 1 };
+    account_disabled: 1, cannot_disable_self: 1, reeval_pending: 1 };
   if (code === 429) { toast(t("err_rate_limited"), "error"); return; }
   toast(known[code] ? t("err_" + code) : t("err_generic", code), "error");
 }
@@ -100,6 +100,7 @@ function shell(content) {
       <nav>
         ${navLink("dashboard", "nav_dashboard", "🏠")}
         ${navLink("new", "nav_new", "✨")}
+        ${navLink("catalogue", "nav_catalogue", "📚")}
         ${navLink("leaderboard", "nav_leaderboard", "🏆")}
         ${u.is_admin ? navLink("admin", "nav_admin", "🛡️") : ""}
         ${navLink("settings", "nav_settings", "⚙️")}
@@ -113,9 +114,9 @@ function shell(content) {
     <main>${content}</main>
     <nav class="bottomnav">
       ${navLink("dashboard", "nav_dashboard", "🏠")}
+      ${navLink("catalogue", "nav_catalogue_short", "📚")}
       ${navLink("new", "nav_new_short", "✨")}
-      ${navLink("leaderboard", "nav_leaderboard_short", "🏆")}
-      ${u.is_admin ? navLink("admin", "nav_admin", "🛡️") : ""}
+      ${u.is_admin ? navLink("admin", "nav_admin", "🛡️") : navLink("leaderboard", "nav_leaderboard_short", "🏆")}
       ${navLink("settings", "nav_settings_short", "⚙️")}
     </nav>
   </div>`;
@@ -326,7 +327,8 @@ function progressLabel(topic) {
 function topicCardHtml(topic) {
   const badge = `<span class="badge ${topic.status}">${t("status_" + topic.status)}</span>`;
   const mode = `<span class="badge mode">${t("mode_" + topic.mode)}</span>`
-    + (topic.shared ? ` <span class="badge queued">👥 ${esc(topic.owner_name)}</span>` : "");
+    + (topic.shared ? ` <span class="badge queued">👥${topic.owner_name ? " " + esc(topic.owner_name) : ""}</span>` : "")
+    + (topic.visibility === "private" && !topic.shared ? ` <span class="badge queued">🔒</span>` : "");
   let body = "";
   if (topic.status === "processing" || topic.status === "queued") {
     body = `
@@ -437,6 +439,13 @@ function renderNew() {
         </select></label>
     </div>
 
+    <label class="field"><span>${t("visibility_label")}</span>
+      <select name="visibility" onchange="document.getElementById('vis-hint').textContent = this.value === 'private' ? FD._t('visibility_private_hint') : FD._t('visibility_public_hint')">
+        <option value="public">${t("visibility_public")}</option>
+        <option value="private">${t("visibility_private")}</option>
+      </select>
+      <small class="dim" id="vis-hint">${t("visibility_public_hint")}</small></label>
+
     <label class="field"><span>${t("sources_label")}</span></label>
     <div class="dropzone" id="dropzone">📄 ${t("upload_hint")}</div>
     <input type="file" id="file-input" multiple hidden accept=".pdf,.docx,.txt,.md,.csv">
@@ -544,7 +553,13 @@ async function renderTopic(id) {
           onchange="FD.toggleRefresh(${topic.id}, this.checked)">
         <span class="track"></span> 🌙 ${t("nightly_refresh")}
       </label>
-      <p class="small dim" style="margin:6px 0 0">${t("nightly_refresh_hint")}</p>` : ""}
+      <p class="small dim" style="margin:6px 0 0">${t("nightly_refresh_hint")}</p>
+      <label class="switch" style="margin-top:12px">
+        <input type="checkbox" ${topic.visibility === "public" ? "checked" : ""}
+          onchange="FD.toggleVisibility(${topic.id}, this.checked)">
+        <span class="track"></span> 🌍 ${t("visibility_public")}
+      </label>
+      <p class="small dim" style="margin:6px 0 0">${topic.visibility === "public" ? t("visibility_public_hint") : t("visibility_private_hint")}</p>` : ""}
     </div>`;
   } else if (topic.status === "failed") {
     actionHtml = `<div class="card">
@@ -703,11 +718,17 @@ async function renderTopic(id) {
         <button class="btn sm danger" onclick="FD.deleteTopic(${topic.id})">🗑 ${t("delete")}</button>
       </div>` : "";
 
+  // Creator identity is admin-only: owner_name is only present for admins.
   const sharedBadge = !topic.is_owner
-    ? ` <span class="badge queued">👥 ${t("shared_by", esc(topic.owner_name))}</span>` : "";
+    ? (topic.owner_name
+        ? ` <span class="badge queued">👥 ${t("shared_by", esc(topic.owner_name))}</span>`
+        : ` <span class="badge queued">👥</span>`)
+    : "";
+  const privBadge = topic.is_owner && topic.visibility === "private"
+    ? ` <span class="badge queued">🔒 ${t("private_badge")}</span>` : "";
 
   $("#app").innerHTML = shell(`
-    <h1>${esc(topic.title)} <span class="badge mode">${t("mode_" + topic.mode)}</span>${sharedBadge}</h1>
+    <h1>${esc(topic.title)} <span class="badge mode">${t("mode_" + topic.mode)}</span>${privBadge}${sharedBadge}</h1>
     ${enriching}${actionHtml}${aiHtml}${materialHtml}${planHtml}${cardsHtml}${reviseHtml}${membersHtml}${sources}${dangerHtml}`);
 
   const bodies = document.querySelectorAll("main .unit-body");
@@ -748,7 +769,10 @@ async function startSessionFor(topicId, size) {
       fifty: {}, optionsShown: false,
     };
     setPointsPill(data.points);
-    go("study");
+    // Render directly: "Study again" restarts from the summary, which is already
+    // at #/study, so setting the same hash would fire no hashchange.
+    if (location.hash !== "#/study") location.hash = "#/study";
+    renderStudy();
   } catch (err) { apiError(err); }
 }
 
@@ -828,6 +852,10 @@ function renderStudy() {
             fb.web_sources.map((s) => `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.title)}</a>`).join(" · ")
           }</div>` : ""}
         </div>` : ""}
+      ${fb.skipped ? "" : `
+      <div id="dispute-box" style="margin-top:12px">
+        <a href="#" class="small dim" onclick="event.preventDefault();FD.openDispute()">${t("dispute_link")}</a>
+      </div>`}
       <button class="btn primary block" style="margin-top:14px" onclick="FD.next()">
         ${last ? "🏁 " + t("finish_session") : t("next_card") + " →"}</button>`;
   }
@@ -1140,10 +1168,10 @@ async function renderAdmin() {
     <h3 style="margin-top:14px">${t("model_per_task")}</h3>
     <p class="small dim">${t("model_per_task_hint")}</p>
     <div class="row">
-      ${["generate", "enrich", "translate", "report"].map((task) => `
+      ${["generate", "enrich", "translate", "report", "judge"].map((task) => `
         <label class="field" style="flex:1;min-width:200px"><span>${t("model_task_" + task)}</span>
           <input type="text" name="model_${task}" value="${esc(ollama.task_models[task] || "")}"
-            placeholder="${esc(t("model_default_ph"))}"></label>`).join("")}
+            placeholder="${task === "judge" ? esc(t("model_judge_ph")) : esc(t("model_default_ph"))}"></label>`).join("")}
     </div>
     <div class="row">
       <button class="btn primary" type="submit">${t("save")}</button>
@@ -1205,6 +1233,7 @@ async function renderAdmin() {
           enrich: fd.get("model_enrich") || "",
           translate: fd.get("model_translate") || "",
           report: fd.get("model_report") || "",
+          judge: fd.get("model_judge") || "",
         },
       }});
       toast(t("saved"), "success");
@@ -1249,6 +1278,44 @@ async function renderAdmin() {
     };
     state.pollTimer = setTimeout(tick, 4000);
   }
+}
+
+/* ---------------- catalogue ---------------- */
+
+async function renderCatalogue() {
+  const data = await api("/catalogue");
+  const byCat = {};
+  for (const tp of data.topics) (byCat[tp.category] ||= []).push(tp);
+  const order = data.categories.filter((c) => byCat[c]);
+
+  const sections = order.map((cat) => `
+    <h2 style="margin:22px 0 10px">${esc(cat)}</h2>
+    <div class="grid">
+      ${byCat[cat].map((tp) => `
+        <div class="card topic-card">
+          <div class="row spread">
+            <span class="badge mode">${t("mode_" + tp.mode)}</span>
+            ${tp.is_owner ? `<span class="badge ready">${t("cat_owner")}</span>`
+              : tp.joined ? `<span class="badge ready">${t("cat_joined")}</span>` : ""}
+          </div>
+          <h3><a href="#/topic/${tp.id}" style="color:inherit">${esc(tp.title)}</a></h3>
+          <div class="small dim">${tp.card_count} ${t("cards")}</div>
+          <div class="row">
+            ${tp.is_owner || tp.joined
+              ? `<a class="btn sm primary" href="#/topic/${tp.id}">▶ ${t("cat_study")}</a>` : ""}
+            ${tp.is_owner ? ""
+              : tp.joined
+              ? `<button class="btn sm ghost" onclick="FD.leaveTopic(${tp.id})">${t("cat_leave")}</button>`
+              : `<button class="btn sm primary" onclick="FD.joinTopic(${tp.id})">➕ ${t("cat_join")}</button>`}
+          </div>
+        </div>`).join("")}
+    </div>`).join("");
+
+  $("#app").innerHTML = shell(`
+    <h1>📚 ${t("catalogue_title")}</h1>
+    ${data.topics.length
+      ? `<p class="dim small">${t("catalogue_intro")}</p>${sections}`
+      : `<div class="card empty"><div class="big">📚</div><p>${t("catalogue_empty")}</p></div>`}`);
 }
 
 /* ---------------- admin: user profile ---------------- */
@@ -1334,6 +1401,7 @@ async function renderAdminUser(id) {
 /* ---------------- handlers (global) ---------------- */
 
 window.FD = {
+  _t: t,
   pickMode(el) {
     document.querySelectorAll("#mode-seg .opt").forEach((o) => o.classList.remove("active"));
     el.classList.add("active");
@@ -1397,6 +1465,13 @@ window.FD = {
     try {
       await api(`/topics/${id}`, { method: "PUT", json: { nightly_refresh: on } });
       toast(t("saved"), "success");
+    } catch (err) { apiError(err); }
+  },
+  async toggleVisibility(id, isPublic) {
+    try {
+      await api(`/topics/${id}`, { method: "PUT", json: { visibility: isPublic ? "public" : "private" } });
+      toast(t("saved"), "success");
+      renderTopic(id).catch(() => {});
     } catch (err) { apiError(err); }
   },
   async retryTopic(id) {
@@ -1503,6 +1578,25 @@ window.FD = {
     state.study.revealed = true;
     renderStudy();
   },
+  openDispute() {
+    const box = $("#dispute-box");
+    if (!box) return;
+    box.innerHTML = `
+      <textarea id="dispute-text" rows="2" placeholder="${esc(t("dispute_ph"))}"></textarea>
+      <button class="btn ghost sm" style="margin-top:8px" onclick="FD.submitDispute()">
+        🚩 ${t("dispute_submit")}</button>`;
+    $("#dispute-text").focus();
+  },
+  async submitDispute() {
+    const st = state.study;
+    const card = st.cards[st.idx];
+    const ctx = ($("#dispute-text")?.value || "").trim();
+    try {
+      await api(`/cards/${card.id}/reevaluate`, { json: { context: ctx } });
+      const box = $("#dispute-box");
+      if (box) box.innerHTML = `<p class="small dim">✅ ${t("dispute_queued")}</p>`;
+    } catch (err) { apiError(err); }
+  },
   showOptions() {
     state.study.optionsShown = true;
     renderStudy();
@@ -1541,6 +1635,14 @@ window.FD = {
     finishStudy();
   },
   backToDash() { state.study = null; go("dashboard"); },
+  async joinTopic(id) {
+    try { await api(`/topics/${id}/join`, { method: "POST" }); toast(t("joined_topic"), "success"); renderCatalogue(); }
+    catch (err) { apiError(err); }
+  },
+  async leaveTopic(id) {
+    try { await api(`/topics/${id}/leave`, { method: "POST" }); toast(t("left_topic"), "success"); renderCatalogue(); }
+    catch (err) { apiError(err); }
+  },
   async studyAgain() {
     const st = state.study;
     state.study = null;
@@ -1583,6 +1685,7 @@ async function route() {
       case "study": renderStudy(); break;
       case "settings": renderSettings(); break;
       case "leaderboard": await renderLeaderboard(); break;
+      case "catalogue": await renderCatalogue(); break;
       case "admin":
         if (parts[1] === "user" && parts[2]) await renderAdminUser(parseInt(parts[2], 10));
         else await renderAdmin();
