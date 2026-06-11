@@ -282,6 +282,14 @@ window.I18N = {
     prof_pw_hint: "The current password is never visible to anyone. Setting a new one logs the user out everywhere.",
     pw_set_ok: "Password updated — the user was logged out everywhere.",
     member_since: "joined {a}",
+    deactivate: "Deactivate",
+    activate: "Activate",
+    disabled_badge: "Deactivated",
+    confirm_deactivate: "Deactivate this account? The user is logged out everywhere and can no longer sign in.",
+    err_account_disabled: "This account has been deactivated.",
+    err_cannot_disable_self: "You can't deactivate your own account.",
+    prof_assign_search_ph: "Search topics by title…",
+    no_topic_found: "No matching topic found.",
   },
 
   de: {
@@ -567,5 +575,13 @@ window.I18N = {
     prof_pw_hint: "Das aktuelle Passwort ist für niemanden einsehbar. Ein neues Passwort meldet den Nutzer überall ab.",
     pw_set_ok: "Passwort aktualisiert — der Nutzer wurde überall abgemeldet.",
     member_since: "dabei seit {a}",
+    deactivate: "Deaktivieren",
+    activate: "Aktivieren",
+    disabled_badge: "Deaktiviert",
+    confirm_deactivate: "Dieses Konto deaktivieren? Der Nutzer wird überall abgemeldet und kann sich nicht mehr anmelden.",
+    err_account_disabled: "Dieses Konto wurde deaktiviert.",
+    err_cannot_disable_self: "Du kannst dein eigenes Konto nicht deaktivieren.",
+    prof_assign_search_ph: "Themen nach Titel suchen…",
+    no_topic_found: "Kein passendes Thema gefunden.",
   },
 };

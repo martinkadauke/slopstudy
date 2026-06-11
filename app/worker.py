@@ -36,10 +36,22 @@ _report_checked: dict[int, str] = {}
 
 
 async def run_forever():
+    """Two parallel lanes, so the heavy (generation) model and a lighter
+    (enrich/translate/report) model can run on Ollama at the same time.
+
+    Each lane awaits at most one LLM call, so the app never has more than two
+    models in flight. (To also cap how many models Ollama keeps *resident*,
+    set OLLAMA_MAX_LOADED_MODELS=2 on the Ollama host.)
+    """
     with db.connect() as con:
         con.execute("UPDATE topics SET status='queued', progress_pct=0 WHERE status='processing'")
         con.execute("UPDATE topic_revisions SET status='queued' WHERE status='processing'")
-    log.info("Worker started (report hour: %02d:00)", REPORT_HOUR)
+    log.info("Worker started: heavy + light lanes (report hour: %02d:00)", REPORT_HOUR)
+    await asyncio.gather(_heavy_loop(), _light_loop())
+
+
+async def _heavy_loop():
+    """Topic generation, natural-language revisions, nightly fresh questions."""
     while True:
         try:
             topic = _next_queued()
@@ -48,16 +60,28 @@ async def run_forever():
                 continue
             if await _process_revision():
                 continue
-            if await _enrich_step():
-                continue
-            await _maybe_send_reports()
             if await _maybe_refresh_topics():
                 continue
             await asyncio.sleep(POLL_INTERVAL)
         except asyncio.CancelledError:
             raise
         except Exception:
-            log.exception("Worker loop error")
+            log.exception("Heavy lane error")
+            await asyncio.sleep(POLL_INTERVAL)
+
+
+async def _light_loop():
+    """Enrichment, translations and weakness reports — typically a smaller model."""
+    while True:
+        try:
+            if await _enrich_step():
+                continue
+            await _maybe_send_reports()
+            await asyncio.sleep(POLL_INTERVAL)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Light lane error")
             await asyncio.sleep(POLL_INTERVAL)
 
 
@@ -133,7 +157,7 @@ async def _process(topic: dict):
         sources_text = extract.combine_sources(sources)
 
         _update(topic_id, progress_msg="planning", progress_pct=15)
-        plan = await llm.generate_plan(user, topic, sources_text)
+        plan = await _await_or_stop(llm.generate_plan(user, topic, sources_text), topic_id)
         _update(topic_id, title=str(plan.get("title", ""))[:120],
                 plan_json=json.dumps(plan, ensure_ascii=False))
 
@@ -149,7 +173,9 @@ async def _process(topic: dict):
             _update(topic_id, progress_msg=f"generating_unit:{i + 1}/{len(units)}",
                     progress_pct=15 + int(80 * i / len(units)))
             try:
-                cards = await llm.generate_unit_cards(user, topic, plan, i, per_unit, sources_text)
+                cards = await _await_or_stop(
+                    llm.generate_unit_cards(user, topic, plan, i, per_unit, sources_text),
+                    topic_id)
             except llm.OllamaError as e:
                 if i == 0:
                     raise
@@ -168,6 +194,11 @@ async def _process(topic: dict):
         topic["title"] = plan.get("title", topic["prompt"][:60])
         await emailer.send_topic_ready(user, topic, total_cards, len(units))
 
+    except _Stopped:
+        # Admin stop aborted the in-flight LLM call (GPU freed immediately).
+        _update(topic_id, status="stopped", progress_msg="", progress_pct=0,
+                cancel_requested=0, error="Stopped by admin")
+        log.info("Topic %s stopped mid-call by admin", topic_id)
     except Exception as e:
         message = str(e) if isinstance(e, llm.OllamaError) else f"Unexpected error: {e}"
         log.exception("Topic %s failed", topic_id)
@@ -272,12 +303,16 @@ def _enrich_halted(topic_id: int) -> bool:
         return bool(row and row["enrich_paused"])
 
 
-async def _await_or_pause(coro, topic_id: int):
-    """Await an LLM call, but cancel it the moment a pause is requested.
+class _Stopped(Exception):
+    """Raised when an admin stop request aborts an in-flight generation call."""
+
+
+async def _await_abortable(coro, stop_check, exc_type):
+    """Await an LLM call, but cancel it the moment stop_check() turns true.
 
     Cancelling drops the httpx connection so Ollama stops generating (freeing the
     GPU). The partial result is discarded; because we only persist AFTER this
-    returns, an interrupted item simply stays pending and is redone on resume.
+    returns, an interrupted item simply stays pending and is redone later.
     """
     task = asyncio.ensure_future(coro)
     try:
@@ -285,16 +320,24 @@ async def _await_or_pause(coro, topic_id: int):
             done, _ = await asyncio.wait({task}, timeout=1.0)
             if task in done:
                 return task.result()
-            if _enrich_halted(topic_id):
+            if stop_check():
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
-                raise _Paused()
+                raise exc_type()
     except asyncio.CancelledError:
         task.cancel()
         raise
+
+
+async def _await_or_pause(coro, topic_id: int):
+    return await _await_abortable(coro, lambda: _enrich_halted(topic_id), _Paused)
+
+
+async def _await_or_stop(coro, topic_id: int):
+    return await _await_abortable(coro, lambda: _is_cancelled(topic_id), _Stopped)
 
 
 async def _enrich_step() -> bool:

@@ -163,6 +163,7 @@ MIGRATIONS = [
     ("topics", "enrich_paused", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "last_report_at", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "is_admin", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "disabled", "INTEGER NOT NULL DEFAULT 0"),
     ("invites", "email", "TEXT NOT NULL DEFAULT ''"),
     ("study_sessions", "jokers_json", "TEXT NOT NULL DEFAULT '{}'"),
 ]

@@ -81,6 +81,9 @@ def current_user(request: Request) -> dict:
         )
     if not row:
         raise HTTPException(status_code=401, detail="not_authenticated")
+    if row.get("disabled"):
+        # Deactivated accounts lose access immediately, existing sessions included.
+        raise HTTPException(status_code=401, detail="account_disabled")
     row.pop("password_hash", None)
     return row
 

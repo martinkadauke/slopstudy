@@ -53,7 +53,8 @@ function apiError(e) {
   const code = e?.detail || e?.message || String(e);
   const known = { invalid_credentials: 1, email_taken: 1, wrong_password: 1,
     not_enough_points: 1, topic_not_ready: 1, joker_used: 1,
-    invite_required: 1, invite_invalid: 1, rate_limited: 1, reset_invalid: 1 };
+    invite_required: 1, invite_invalid: 1, rate_limited: 1, reset_invalid: 1,
+    account_disabled: 1, cannot_disable_self: 1 };
   if (code === 429) { toast(t("err_rate_limited"), "error"); return; }
   toast(known[code] ? t("err_" + code) : t("err_generic", code), "error");
 }
@@ -1062,7 +1063,7 @@ async function renderAdmin() {
   const usersHtml = users.map((us) => `
     <tr>
       <td><a href="#/admin/user/${us.id}"><b>${esc(us.name)}</b></a>${us.id === state.user.id ? ` <span class="dim">(${t("admin_you")})</span>` : ""}
-        ${us.is_admin ? "🛡️" : ""}</td>
+        ${us.is_admin ? "🛡️" : ""}${us.disabled ? ` <span class="badge failed">🚫</span>` : ""}</td>
       <td class="small">${esc(us.email)}</td>
       <td class="small">${us.topics} ${t("admin_topics_count")}</td>
       <td>${us.id === state.user.id ? "" : (us.is_admin
@@ -1252,9 +1253,7 @@ async function renderAdmin() {
 /* ---------------- admin: user profile ---------------- */
 
 async function renderAdminUser(id) {
-  const [profile, allTopics] = await Promise.all([
-    api(`/admin/users/${id}`), api("/admin/topics"),
-  ]);
+  const profile = await api(`/admin/users/${id}`);
   const u = profile.user;
 
   const topicRows = profile.topics.map((tp) => {
@@ -1281,33 +1280,33 @@ async function renderAdminUser(id) {
     </div>`;
   }).join("");
 
-  const have = new Set(profile.topics.map((tp) => tp.id));
-  const assignable = allTopics.filter((tp) => tp.status === "ready" && !have.has(tp.id));
-
   $("#app").innerHTML = shell(`
-  <h1>👤 ${esc(u.name)} ${u.is_admin ? "🛡️" : ""}</h1>
+  <h1>👤 ${esc(u.name)} ${u.is_admin ? "🛡️" : ""}
+    ${u.disabled ? `<span class="badge failed">🚫 ${t("disabled_badge")}</span>` : ""}</h1>
   <div class="card">
-    <div class="row">
-      <span class="pill">📧 ${esc(u.email)}</span>
-      <span class="pill">💎 ${u.points}</span>
-      <span class="pill">⭐ ${t("level")} ${u.level.level}</span>
-      ${u.streak ? `<span class="pill">🔥 ${u.streak}</span>` : ""}
-      <span class="pill">📅 ${t("member_since", fmtDate(u.created_at))}</span>
+    <div class="row spread">
+      <div class="row">
+        <span class="pill">📧 ${esc(u.email)}</span>
+        <span class="pill">💎 ${u.points}</span>
+        <span class="pill">⭐ ${t("level")} ${u.level.level}</span>
+        ${u.streak ? `<span class="pill">🔥 ${u.streak}</span>` : ""}
+        <span class="pill">📅 ${t("member_since", fmtDate(u.created_at))}</span>
+      </div>
+      ${u.id === state.user.id ? "" : (u.disabled
+        ? `<button class="btn sm ok" onclick="FD.setDisabled(${u.id}, false)">✅ ${t("activate")}</button>`
+        : `<button class="btn sm danger" onclick="FD.setDisabled(${u.id}, true)">🚫 ${t("deactivate")}</button>`)}
     </div>
   </div>
 
   <div class="card">
     <h2>📚 ${t("prof_topics")}</h2>
     ${topicRows || `<p class="small dim">${t("prof_no_topics")}</p>`}
-    ${assignable.length ? `
-      <h3 style="margin-top:16px">➕ ${t("prof_assign")}</h3>
-      <p class="small dim">${t("prof_assign_hint")}</p>
-      <div class="row">
-        <select id="assign-topic" style="flex:1;min-width:200px">
-          ${assignable.map((tp) => `<option value="${tp.id}">${esc(tp.title)} (${esc(tp.owner)})</option>`).join("")}
-        </select>
-        <button class="btn primary" onclick="FD.adminAssignTopic(${id})">${t("prof_assign_btn")}</button>
-      </div>` : ""}
+    <h3 style="margin-top:16px">➕ ${t("prof_assign")}</h3>
+    <p class="small dim">${t("prof_assign_hint")}</p>
+    <input type="text" id="assign-search" autocomplete="off"
+      placeholder="${esc(t("prof_assign_search_ph"))}"
+      oninput="FD.adminTopicSearch(${id}, this.value)">
+    <div id="assign-results"></div>
   </div>
 
   <form class="card" id="admin-pw-form">
@@ -1417,12 +1416,35 @@ window.FD = {
     try { await api(`/topics/${id}`, { method: "DELETE" }); renderAdmin(); }
     catch (err) { apiError(err); }
   },
-  async adminAssignTopic(userId) {
-    const sel = $("#assign-topic");
-    if (!sel) return;
+  adminTopicSearch(userId, value) {
+    clearTimeout(state.searchTimer);
+    const box = $("#assign-results");
+    if (!value || value.trim().length < 2) { if (box) box.innerHTML = ""; return; }
+    state.searchTimer = setTimeout(async () => {
+      try {
+        const topics = await api(
+          `/admin/topics/search?q=${encodeURIComponent(value.trim())}&user_id=${userId}`);
+        if (!box) return;
+        box.innerHTML = topics.length
+          ? topics.map((tp) => `<button class="btn sm ghost" style="margin:6px 6px 0 0"
+              onclick="FD.adminAssignTopic(${tp.id}, ${userId})">➕ ${esc(tp.title)}
+              <span class="dim">(${esc(tp.owner)})</span></button>`).join("")
+          : `<p class="small dim" style="margin:8px 0 0">${t("no_topic_found")}</p>`;
+      } catch (err) { apiError(err); }
+    }, 250);
+  },
+  async adminAssignTopic(topicId, userId) {
     try {
-      await api(`/topics/${sel.value}/members`, { json: { user_id: userId } });
+      await api(`/topics/${topicId}/members`, { json: { user_id: userId } });
       toast(t("share_added"), "success");
+      renderAdminUser(userId).catch(() => {});
+    } catch (err) { apiError(err); }
+  },
+  async setDisabled(userId, disabled) {
+    if (disabled && !confirm(t("confirm_deactivate"))) return;
+    try {
+      await api(`/admin/users/${userId}/disabled`, { method: "PUT", json: { disabled } });
+      toast(t("saved"), "success");
       renderAdminUser(userId).catch(() => {});
     } catch (err) { apiError(err); }
   },

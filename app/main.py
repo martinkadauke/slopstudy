@@ -143,6 +143,8 @@ def login(body: LoginBody, request: Request, response: Response):
         user = db.one(con, "SELECT * FROM users WHERE email=?", (body.email,))
     if not user or not auth.verify_password(body.password, user["password_hash"]):
         raise HTTPException(401, "invalid_credentials")
+    if user["disabled"]:
+        raise HTTPException(403, "account_disabled")
     auth.sync_admin_flag(user["id"], user["email"])
     _set_session_cookie(response, auth.create_token(user["id"]))
     return {"ok": True}
@@ -220,6 +222,8 @@ def reset_password(body: ResetBody):
         con.execute("DELETE FROM password_resets WHERE user_id=?", (row["user_id"],))
         # Invalidate every existing session: whoever holds the inbox now owns the account.
         con.execute("DELETE FROM auth_tokens WHERE user_id=?", (row["user_id"],))
+        u = db.one(con, "SELECT * FROM users WHERE id=?", (row["user_id"],))
+    emailer.send_notice_sync(u["email"], u["language"], "pw_changed", name=u["name"])
     return {"ok": True}
 
 
@@ -278,6 +282,10 @@ def update_profile(body: ProfileBody, user: dict = Depends(auth.current_user)):
                 raise HTTPException(409, "email_taken")
         cols = ", ".join(f"{k}=?" for k in updates)
         con.execute(f"UPDATE users SET {cols} WHERE id=?", (*updates.values(), user["id"]))
+    if "email" in updates and updates["email"].lower() != user["email"].lower():
+        # Security notice to the OLD address — the one a hijacker doesn't control.
+        emailer.send_notice_sync(user["email"], user["language"], "email_changed",
+                                 name=user["name"], new_email=updates["email"])
     return {"ok": True}
 
 
@@ -294,6 +302,7 @@ def change_password(body: PasswordBody, user: dict = Depends(auth.current_user))
             raise HTTPException(403, "wrong_password")
         con.execute("UPDATE users SET password_hash=? WHERE id=?",
                     (auth.hash_password(body.new_password), user["id"]))
+    emailer.send_notice_sync(user["email"], user["language"], "pw_changed", name=user["name"])
     return {"ok": True}
 
 
@@ -543,11 +552,19 @@ def add_member(topic_id: int, body: MemberBody, user: dict = Depends(auth.curren
             raise HTTPException(409, "already_member")
         if not db.one(con, "SELECT id FROM users WHERE id=?", (body.user_id,)):
             raise HTTPException(404, "user_not_found")
+        already = db.one(con, "SELECT 1 AS x FROM topic_members WHERE topic_id=? AND user_id=?",
+                         (topic_id, body.user_id))
         con.execute(
             """INSERT INTO topic_members (topic_id, user_id, added_at) VALUES (?,?,?)
                ON CONFLICT(topic_id, user_id) DO NOTHING""",
             (topic_id, body.user_id, db.now()),
         )
+        member = db.one(con, "SELECT * FROM users WHERE id=?", (body.user_id,))
+    if not already and member["email_notifications"] and not member["disabled"]:
+        emailer.send_notice_sync(
+            member["email"], member["language"], "topic_shared",
+            link_path=f"/#/topic/{topic_id}", name=member["name"], actor=user["name"],
+            title=topic["title"] or topic["prompt"][:60])
     return {"ok": True}
 
 
@@ -560,20 +577,29 @@ def remove_member(topic_id: int, member_id: int, user: dict = Depends(auth.curre
     return {"ok": True}
 
 
+def _mask_email(email: str) -> str:
+    local, _, domain = email.partition("@")
+    return f"{local[:1]}***@{domain}" if domain else "***"
+
+
 @app.get("/api/users/search")
 def search_users(q: str = "", user: dict = Depends(auth.current_user)):
-    """Find existing users to share a topic with (small instance, names are public
-    on the leaderboard anyway)."""
+    """Find existing users to share a topic with. Names are public on the
+    leaderboard anyway; emails are masked for non-admins."""
     needle = f"%{q.strip()}%"
     if len(q.strip()) < 2:
         return []
     with db.connect() as con:
-        return db.all_rows(
+        rows = db.all_rows(
             con,
             """SELECT id, name, email FROM users
-               WHERE (name LIKE ? OR email LIKE ?) AND id != ? LIMIT 8""",
+               WHERE (name LIKE ? OR email LIKE ?) AND id != ? AND disabled = 0 LIMIT 8""",
             (needle, needle, user["id"]),
         )
+    if not user.get("is_admin"):
+        for row in rows:
+            row["email"] = _mask_email(row["email"])
+    return rows
 
 
 @app.delete("/api/topics/{topic_id}")
@@ -692,9 +718,33 @@ def admin_users(admin: dict = Depends(auth.current_admin)):
     with db.connect() as con:
         return db.all_rows(
             con,
-            """SELECT u.id, u.name, u.email, u.is_admin, u.lifetime_points, u.created_at,
+            """SELECT u.id, u.name, u.email, u.is_admin, u.disabled, u.lifetime_points,
+                      u.created_at,
                       (SELECT COUNT(*) FROM topics t WHERE t.user_id=u.id) AS topics
                FROM users u ORDER BY u.id""",
+        )
+
+
+@app.get("/api/admin/topics/search")
+def admin_topic_search(q: str = "", user_id: int = 0,
+                       admin: dict = Depends(auth.current_admin)):
+    """Typeahead for assigning topics: ready decks matching q that the given
+    user neither owns nor has joined."""
+    if len(q.strip()) < 2:
+        return []
+    needle = f"%{q.strip()}%"
+    with db.connect() as con:
+        return db.all_rows(
+            con,
+            """SELECT t.id, COALESCE(NULLIF(t.title, ''), substr(t.prompt, 1, 60)) AS title,
+                      u.name AS owner
+               FROM topics t JOIN users u ON u.id = t.user_id
+               WHERE t.status = 'ready'
+                 AND (t.title LIKE :q OR t.prompt LIKE :q)
+                 AND t.user_id != :uid
+                 AND t.id NOT IN (SELECT topic_id FROM topic_members WHERE user_id = :uid)
+               ORDER BY t.id DESC LIMIT 8""",
+            {"q": needle, "uid": user_id},
         )
 
 
@@ -756,6 +806,8 @@ def admin_set_password(user_id: int, body: AdminPasswordBody,
                     (auth.hash_password(body.password), user_id))
         # The user must re-authenticate with the new password everywhere.
         con.execute("DELETE FROM auth_tokens WHERE user_id=?", (user_id,))
+        u = db.one(con, "SELECT * FROM users WHERE id=?", (user_id,))
+    emailer.send_notice_sync(u["email"], u["language"], "pw_admin_set", name=u["name"])
     return {"ok": True}
 
 
@@ -768,9 +820,34 @@ def admin_set_user(user_id: int, body: AdminUserBody, admin: dict = Depends(auth
     if user_id == admin["id"] and not body.is_admin:
         raise HTTPException(409, "cannot_demote_self")
     with db.connect() as con:
-        if not db.one(con, "SELECT id FROM users WHERE id=?", (user_id,)):
+        u = db.one(con, "SELECT * FROM users WHERE id=?", (user_id,))
+        if not u:
             raise HTTPException(404, "user_not_found")
         con.execute("UPDATE users SET is_admin=? WHERE id=?", (int(body.is_admin), user_id))
+    if body.is_admin and not u["is_admin"]:
+        emailer.send_notice_sync(u["email"], u["language"], "admin_granted", name=u["name"])
+    return {"ok": True}
+
+
+class DisableBody(BaseModel):
+    disabled: bool
+
+
+@app.put("/api/admin/users/{user_id}/disabled")
+def admin_set_disabled(user_id: int, body: DisableBody,
+                       admin: dict = Depends(auth.current_admin)):
+    if user_id == admin["id"]:
+        raise HTTPException(409, "cannot_disable_self")
+    with db.connect() as con:
+        u = db.one(con, "SELECT * FROM users WHERE id=?", (user_id,))
+        if not u:
+            raise HTTPException(404, "user_not_found")
+        con.execute("UPDATE users SET disabled=? WHERE id=?", (int(body.disabled), user_id))
+        if body.disabled:
+            con.execute("DELETE FROM auth_tokens WHERE user_id=?", (user_id,))
+    emailer.send_notice_sync(
+        u["email"], u["language"],
+        "account_disabled" if body.disabled else "account_enabled", name=u["name"])
     return {"ok": True}
 
 

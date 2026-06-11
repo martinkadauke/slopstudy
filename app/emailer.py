@@ -169,6 +169,93 @@ def send_invitation_sync(to_addr: str, subject: str, body: str,
     _send_sync(to_addr, subject, body, html=wrap_html(subject, body, cta_text, cta_url))
 
 
+# ------------------------------------------------------------------ notices
+# Account/security events. Every notice links back to SlopStudy (or deeplinks
+# to the relevant item). Security notices ignore the email_notifications pref.
+
+NOTICES = {
+    "pw_admin_set": {
+        "en": ("Your SlopStudy password was changed by an administrator",
+               "Hi {name},\n\nan administrator just set a new password for your account and "
+               "you have been signed out everywhere. If you did not expect this, contact your "
+               "administrator.\n\nLog in with your new password here:\n{link}"),
+        "de": ("Dein SlopStudy-Passwort wurde von einem Administrator geändert",
+               "Hallo {name},\n\nein Administrator hat soeben ein neues Passwort für dein Konto "
+               "gesetzt und du wurdest überall abgemeldet. Falls du das nicht erwartet hast, "
+               "wende dich an deinen Administrator.\n\nHier mit dem neuen Passwort anmelden:\n{link}"),
+    },
+    "pw_changed": {
+        "en": ("Your SlopStudy password was changed",
+               "Hi {name},\n\nyour password was just changed. If this was you, you're all set. "
+               "If not, reset it immediately or contact your administrator.\n\n{link}"),
+        "de": ("Dein SlopStudy-Passwort wurde geändert",
+               "Hallo {name},\n\ndein Passwort wurde soeben geändert. Wenn du das warst, ist "
+               "alles in Ordnung. Falls nicht, setze es sofort zurück oder wende dich an deinen "
+               "Administrator.\n\n{link}"),
+    },
+    "email_changed": {
+        "en": ("Your SlopStudy email address was changed",
+               "Hi {name},\n\nthe email address of your account was just changed to {new_email}. "
+               "If this wasn't you, contact your administrator immediately.\n\n{link}"),
+        "de": ("Deine SlopStudy-E-Mail-Adresse wurde geändert",
+               "Hallo {name},\n\ndie E-Mail-Adresse deines Kontos wurde soeben zu {new_email} "
+               "geändert. Falls das nicht du warst, wende dich sofort an deinen Administrator."
+               "\n\n{link}"),
+    },
+    "topic_shared": {
+        "en": ("{actor} shared a study topic with you",
+               "Hi {name},\n\n{actor} shared the study topic \"{title}\" with you on SlopStudy. "
+               "You can start studying it right away:\n{link}"),
+        "de": ("{actor} hat ein Lernthema mit dir geteilt",
+               "Hallo {name},\n\n{actor} hat das Lernthema \"{title}\" auf SlopStudy mit dir "
+               "geteilt. Du kannst sofort loslegen:\n{link}"),
+    },
+    "admin_granted": {
+        "en": ("You are now a SlopStudy administrator",
+               "Hi {name},\n\nyou were just given administrator rights on SlopStudy. You can "
+               "now manage users, invitations, the AI queue and the Ollama connection.\n\n{link}"),
+        "de": ("Du bist jetzt SlopStudy-Administrator",
+               "Hallo {name},\n\ndir wurden soeben Administratorrechte auf SlopStudy gegeben. "
+               "Du kannst jetzt Nutzer, Einladungen, die KI-Warteschlange und die "
+               "Ollama-Verbindung verwalten.\n\n{link}"),
+    },
+    "account_disabled": {
+        "en": ("Your SlopStudy account was deactivated",
+               "Hi {name},\n\nyour account was deactivated by an administrator and you have "
+               "been signed out. If you believe this is a mistake, contact your administrator."
+               "\n\n{link}"),
+        "de": ("Dein SlopStudy-Konto wurde deaktiviert",
+               "Hallo {name},\n\ndein Konto wurde von einem Administrator deaktiviert und du "
+               "wurdest abgemeldet. Wenn du das für einen Fehler hältst, wende dich an deinen "
+               "Administrator.\n\n{link}"),
+    },
+    "account_enabled": {
+        "en": ("Your SlopStudy account was reactivated",
+               "Hi {name},\n\ngood news — your account was reactivated. Welcome back!\n\n{link}"),
+        "de": ("Dein SlopStudy-Konto wurde reaktiviert",
+               "Hallo {name},\n\ngute Nachrichten — dein Konto wurde reaktiviert. "
+               "Willkommen zurück!\n\n{link}"),
+    },
+}
+
+
+def send_notice_sync(to_addr: str, lang: str, key: str, link_path: str = "", **fmt):
+    """Send one branded notice mail (best-effort; never raises into the caller)."""
+    if not smtp_configured():
+        return
+    base = os.environ.get("APP_BASE_URL", "http://localhost:8000").rstrip("/")
+    link = base + link_path
+    subject_t, body_t = NOTICES[key].get(lang, NOTICES[key]["en"])
+    subject = subject_t.format(link=link, **fmt)
+    body = body_t.format(link=link, **fmt)
+    cta = _CTA_OPEN.get(lang, _CTA_OPEN["en"])
+    try:
+        _send_sync(to_addr, subject, body, wrap_html(subject, body, cta, link))
+        log.info("Sent %s notice to %s", key, to_addr)
+    except Exception:
+        log.exception("Failed to send %s notice to %s", key, to_addr)
+
+
 def _report_strings(user: dict) -> dict:
     return REPORT_STRINGS.get(user.get("language", "en"), REPORT_STRINGS["en"])
 
@@ -241,23 +328,24 @@ def _send_sync(to_addr: str, subject: str, body: str, html: str | None = None):
 
 async def send_topic_ready(user: dict, topic: dict, cards: int, units: int):
     await _send_templated(
-        user, "subject", "body",
+        user, "subject", "body", link_path=f"/#/topic/{topic['id']}",
         title=topic["title"] or topic["prompt"][:60], cards=cards, units=units,
     )
 
 
 async def send_topic_failed(user: dict, topic: dict, error: str):
     await _send_templated(
-        user, "subject_failed", "body_failed",
+        user, "subject_failed", "body_failed", link_path=f"/#/topic/{topic['id']}",
         title=topic["title"] or topic["prompt"][:60], error=error,
     )
 
 
-async def _send_templated(user: dict, subject_key: str, body_key: str, **kwargs):
+async def _send_templated(user: dict, subject_key: str, body_key: str,
+                          link_path: str = "", **kwargs):
     if not smtp_configured() or not user.get("email_notifications", 1):
         return
     tpl = TEMPLATES.get(user.get("language", "en"), TEMPLATES["en"])
-    link = os.environ.get("APP_BASE_URL", "http://localhost:8000").rstrip("/")
+    link = os.environ.get("APP_BASE_URL", "http://localhost:8000").rstrip("/") + link_path
     subject = tpl[subject_key].format(**kwargs, name=user["name"], link=link)
     body = tpl[body_key].format(**kwargs, name=user["name"], link=link)
     cta = _CTA_OPEN.get(user.get("language", "en"), _CTA_OPEN["en"])
